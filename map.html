@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.googleapis.com https://*.gstatic.com *.google.com https://*.ggpht.com *.googleusercontent.com blob:; img-src 'self' https://*.googleapis.com https://*.gstatic.com *.google.com *.googleusercontent.com data:; frame-src *.google.com; connect-src 'self' https://*.googleapis.com *.google.com https://*.gstatic.com https://script.googleusercontent.com data: blob:; font-src https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; worker-src blob:; base-uri 'self'; form-action 'self'">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f5c3a">
+<title>Customer map — Prosol Foods</title>
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+<style>
+  html, body { height: 100%; }
+  body { margin: 0; display: flex; flex-direction: column; background: var(--bg); }
+  .mbar { display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: var(--brand, #0f5c3a); color: #fff; }
+  .mbar a { color: #fff; text-decoration: none; font-size: 22px; line-height: 1; }
+  .mbar h1 { font-size: 18px; margin: 0; flex: 1; }
+  .mfilters { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--card, #fff); }
+  .mfilters select, .mfilters input { flex: 1 1 150px; min-width: 130px; width: auto; }
+  .mcount { padding: 6px 16px; font-size: 13px; color: var(--muted); }
+  #map { flex: 1 1 auto; min-height: 340px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 6px 16px; font-size: 12px; color: var(--muted); }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
+  .iw { font: 13px/1.4 system-ui, sans-serif; color: #111; max-width: 260px; }
+  .iw h3 { margin: 0 0 4px; font-size: 15px; }
+  .iw dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; margin: 6px 0; }
+  .iw dt { color: #555; } .iw dd { margin: 0; }
+  .iw a { color: #0f5c3a; font-weight: 600; margin-right: 10px; }
+  #missing { padding: 0 16px 16px; }
+</style>
+</head>
+<body>
+<div class="mbar"><a href="./#/reports" aria-label="Back to the app">‹</a><h1>Customer map</h1></div>
+<div class="mfilters" id="filters"></div>
+<div class="legend"><span><span class="dot" style="background:#1e8e4e"></span>Ordered in last 30 days</span><span><span class="dot" style="background:#e0a100"></span>No recent order</span><span><span class="dot" style="background:#8a8a8a"></span>Inactive</span></div>
+<div class="mcount" id="count">Loading…</div>
+<div id="map" role="region" aria-label="Map of customer locations"></div>
+<div id="missing"></div>
+<div id="toast" aria-live="polite"></div>
+<script src="config.js"></script>
+<script src="map.js"></script>
+</body>
+</html>
