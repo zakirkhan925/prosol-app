@@ -1016,7 +1016,7 @@
     var q = r.q, page = Number(q.page) || 1;
     loading('Customers');
     loadCustOptions().then(function () {
-      return API.call('customers.list', { q: q.q, area: q.area, salespersonId: q.sp, active: q.active, gps: q.gps, qb: q.qb, page: page });
+      return API.call('customers.list', { q: q.q, area: q.area, salespersonId: q.sp, active: q.active, gps: q.gps, qb: q.qb, incomplete: q.incomplete, page: page });
     }).then(function (res) {
       var canCreate = can(['customers.manage', 'customers.create.own']);
       var html = '<div class="toolbar"><input type="search" class="search" id="cq" placeholder="Search name, code, phone, area" value="' + esc(q.q || '') + '">' +
@@ -1026,6 +1026,7 @@
         '<select id="cAct"><option value="">Active + inactive</option><option value="true"' + (q.active === 'true' ? ' selected' : '') + '>Active</option><option value="false"' + (q.active === 'false' ? ' selected' : '') + '>Inactive</option></select>' +
         (canCreate ? '<a class="btn primary" href="#/customers/new">+ New customer</a>' : '') + '</div>';
       if (q.qb === 'unmapped') html += '<div class="alert warn">Showing customers not mapped to QuickBooks. <a href="#/customers">Clear</a></div>';
+      if (q.incomplete === '1') html += '<div class="alert warn">Showing customers with details still missing (mobile, address, area, city or salesperson). Open each one and press Edit. <a href="#/customers">Clear</a></div>';
       if (!res.items.length) html += '<div class="empty card">No customers found.</div>';
       else html += '<ul class="list">' + res.items.map(function (c) {
         return '<li><a class="row" href="#/customers/' + encodeURIComponent(c.CustomerID) + '"><span class="main-t"><div class="t1">' + esc(c.ShopName) + '</div><div class="t2">' + esc(c.Code) + ' · ' + esc(c.Area) + ' · ' + esc(c.Mobile) + (c.SalespersonName ? ' · ' + esc(c.SalespersonName) : '') + '</div></span>' +
@@ -1204,12 +1205,13 @@
   VIEWS.products = function (r) {
     var q = r.q, page = Number(q.page) || 1;
     loading('Products');
-    Promise.all([cats ? Promise.resolve(cats) : API.call('categories.list'), API.call('products.list', { q: q.q, categoryId: q.cat, active: q.active, qb: q.qb, page: page })]).then(function (res) {
+    Promise.all([cats ? Promise.resolve(cats) : API.call('categories.list'), API.call('products.list', { q: q.q, categoryId: q.cat, active: q.active, qb: q.qb, review: q.review, page: page })]).then(function (res) {
       cats = res[0]; var list = res[1];
       var html = '<div class="toolbar"><input type="search" class="search" id="pq" placeholder="Search name, SKU, category" value="' + esc(q.q || '') + '">' +
         '<select id="pCat"><option value="">All categories</option>' + cats.map(function (c) { return '<option value="' + esc(c.CategoryID) + '"' + (c.CategoryID === q.cat ? ' selected' : '') + '>' + esc(c.Name) + '</option>'; }).join('') + '</select>' +
         (can('products.manage') ? '<button class="btn primary" id="pNew">+ New product</button>' : '') + '</div>';
       if (q.qb === 'unmapped') html += '<div class="alert warn">Showing products not mapped to QuickBooks. <a href="#/products">Clear</a></div>';
+      if (q.review === '1') html += '<div class="alert warn">Showing products created from QuickBooks that nobody has checked yet. Open each one, check <b>units per carton</b>, unit, price and tax, and press Save. <a href="#/products">Clear</a></div>';
       html += list.items.length ? '<ul class="list">' + list.items.map(function (p, i) {
         return '<li><a class="row" role="button" tabindex="0" style="cursor:pointer" data-i="' + i + '"><span class="main-t"><div class="t1">' + esc(p.Name) + '</div><div class="t2">' + esc(p.SKU) + ' · ' + esc(p.CategoryName) + ' · ' + esc(p.Unit) + (p.PackSize ? ' ' + esc(p.PackSize) : '') + ' · ' + p.UnitsPerCarton + ' per carton · ' + money(p.WholesalePrice) + '</div></span>' +
           (p.QBListID ? '' : '<span class="badge warn">QB?</span>') + (p.Active ? '' : ' <span class="badge bad">Inactive</span>') + '</a></li>';
@@ -1860,6 +1862,10 @@
         '<dt>Lists imported</dt><dd>' + st.lists.customers + ' customers, ' + st.lists.items + ' items' + (st.listsUpdatedAt ? ' · ' + fmtDate(st.listsUpdatedAt) : '') + '</dd>' +
         '<dt>Bridge key</dt><dd>' + (st.keyCreatedAt ? 'created ' + fmtDate(st.keyCreatedAt) : '<span class="badge warn">not generated</span>') + '</dd></dl>' +
         (st.canGenerateKey ? '<div class="btn-row"><button class="btn" id="genKey">' + (st.keyCreatedAt ? 'Replace bridge key' : 'Generate bridge key') + '</button></div>' : '') + '</div>';
+      if (can(['customers.manage', 'products.manage'])) html += '<div class="card"><h2>Create customers and products from QuickBooks</h2>' +
+        '<p style="font-size:14px;color:var(--muted)">Creates a Prosol customer for every active QuickBooks customer, and a Prosol product for the QuickBooks items you choose, already mapped. Records that are already mapped are skipped, so it is safe to run again after new customers or items are added in QuickBooks. Nothing is changed in QuickBooks.</p>' +
+        (st.lists.customers + st.lists.items ? '<div class="btn-row"><button class="btn primary" id="qbImp">Preview</button></div>' :
+          '<div class="alert warn">The QuickBooks lists have not been imported yet. They arrive when the bridge on the QuickBooks PC connects for the first time.</div>') + '</div>';
       html += '<div class="toolbar">' + QB_TABS.map(function (t) {
         var n = t[0] === '' ? '' : t[0] === 'MISMATCH' ? st.totalMismatches : (st.counts[t[0]] || 0);
         return '<a class="btn' + ((q.status || '') === t[0] ? ' primary' : '') + '" href="#/quickbooks' + (t[0] ? '?status=' + t[0] : '') + '">' + t[1] + (n !== '' ? ' (' + n + ')' : '') + '</a>';
@@ -1889,6 +1895,7 @@
           }).join('') + '</table></div><div class="btn-row"><button class="btn" id="lc">Close</button></div>', function (m, close) { $('#lc', m).onclick = close; });
         }).catch(showError);
       }; });
+      if ($('#qbImp', root)) $('#qbImp', root).onclick = function () { qbImportDialog(); };
       if ($('#genKey', root)) $('#genKey', root).onclick = function () {
         confirmBox('Bridge key', st.keyCreatedAt ? 'Replacing the key disconnects the running bridge until the new key is pasted into it (ProsolQBBridge.exe --setup). Continue?' : 'Generate the key that the QuickBooks bridge uses to connect?', 'Generate').then(function (y) {
           if (!y) return;
@@ -1899,6 +1906,67 @@
       };
     }).catch(showError);
   };
+
+  var QB_TYPE_LABELS = { Assembly: 'Inventory assembly (manufactured)', Inventory: 'Inventory part', NonInventory: 'Non-inventory part', Service: 'Service' };
+  /** Preview → choose finished-product groups and defaults → create in batches until done. */
+  function qbImportDialog() {
+    Promise.all([API.call('qb.importPreview'), API.call('salespersons.options').catch(function () { return []; })]).then(function (res) {
+      var pv = res[0], sps = res[1] || [];
+      var groups = pv.itemGroups || [];
+      var body = (pv.detailsAvailable ? '' : '<div class="alert warn">QuickBooks has sent names only (no phone or address). Update the bridge on the QuickBooks PC to bring phone, address and price too, or continue and fill them in later.</div>') +
+        (pv.canCustomers ? '<label class="check"><input type="checkbox" id="impC"' + (pv.customers.count ? ' checked' : ' disabled') + '> <b>Customers</b> — ' + pv.customers.count + ' to create' +
+          (pv.customers.count ? ' (' + pv.customers.withPhone + ' with a phone number)' : ' (all are already in Prosol)') + '</label>' +
+          (pv.customers.jobs ? '<label class="check" style="margin-left:26px"><input type="checkbox" id="impJobs"> also ' + pv.customers.jobs + ' sub-customers / jobs</label>' : '') +
+          '<div class="form-grid" style="margin:8px 0 14px"><div class="field"><label>Salesperson (when the QuickBooks rep does not match)</label><select id="impSp"><option value="">— assign later —</option>' +
+          sps.map(function (s) { return '<option value="' + esc(s.id || s.SalespersonID) + '">' + esc(s.label || s.Name) + '</option>'; }).join('') + '</select></div>' +
+          '<div class="field"><label>Area (optional, for all)</label><input id="impArea" maxlength="100"></div></div>' : '') +
+        (pv.canProducts ? '<div style="margin-top:6px"><b>Products</b> — tick the groups that are <b>finished products</b> you sell (leave raw materials and packaging unticked):</div>' +
+          (groups.length ? '<div class="scroll-x" style="max-height:260px;overflow:auto;margin:6px 0"><table class="tbl"><tr><th></th><th>QuickBooks type</th><th>Parent / group</th><th class="n">Items</th><th>Examples</th></tr>' +
+            groups.map(function (g, i) {
+              return '<tr><td><input type="checkbox" class="impG" data-i="' + i + '"' + (g.type === 'Assembly' ? ' checked' : '') + '></td><td>' + esc(QB_TYPE_LABELS[g.type] || g.type) + '</td><td>' + (g.parent ? esc(g.parent) : '<i>(no parent)</i>') +
+                '</td><td class="n">' + g.count + '</td><td style="font-size:12px">' + esc(g.sample.join(', ')) + '</td></tr>';
+            }).join('') + '</table></div>' +
+            '<div class="form-grid"><div class="field"><label>Units per carton (for all; check each product afterwards)</label><input id="impUpc" type="number" min="1" value="1"></div>' +
+            '<div class="field"><label>Unit</label><input id="impUnit" value="Pcs" maxlength="30"></div></div>'
+            : '<p class="hint">No items left to create (all sellable QuickBooks items are already in Prosol).</p>') : '') +
+        '<div id="impOut"></div><div class="btn-row"><button class="btn primary" id="impGo">Create in Prosol</button><button class="btn" id="impX">Close</button></div>';
+      modal('Create from QuickBooks', body, function (m, close) {
+        $('#impX', m).onclick = function () { close(); render(); };
+        $('#impGo', m).onclick = function () {
+          var btn = this, sel = $all('.impG', m).filter(function (x) { return x.checked; }).map(function (x) { return groups[Number(x.dataset.i)].key; });
+          var payload = { customers: !!($('#impC', m) && $('#impC', m).checked), products: sel.length > 0, itemGroups: sel,
+            includeJobs: !!($('#impJobs', m) && $('#impJobs', m).checked), salespersonId: $('#impSp', m) ? $('#impSp', m).value : '',
+            area: $('#impArea', m) ? $('#impArea', m).value : '', unitsPerCarton: $('#impUpc', m) ? $('#impUpc', m).value : 1, unit: $('#impUnit', m) ? $('#impUnit', m).value : 'Pcs' };
+          if (!payload.customers && !payload.products) return toast('Tick customers and/or at least one product group.');
+          var tot = { customers: 0, products: 0 }, nd = { noMobile: 0, noAddress: 0, noCity: 0, noSalesperson: 0, duplicateMobile: 0 }, noPrice = 0;
+          busy(btn, true);
+          var step = function () {
+            return API.call('qb.importToApp', payload).then(function (r) {
+              tot.customers += r.created.customers; tot.products += r.created.products; noPrice += r.noPrice || 0;
+              Object.keys(nd).forEach(function (k) { nd[k] += r.needDetails[k] || 0; });
+              $('#impOut', m).innerHTML = '<div class="alert">' + (r.done ? 'Finished' : 'Working…') + ' Created <b>' + tot.customers + '</b> customers and <b>' + tot.products + '</b> products' +
+                (r.done ? '.' : ' (' + (r.remaining.customers + r.remaining.products) + ' left)') + '</div>';
+              return r.done ? r : step();
+            });
+          };
+          step().then(function () {
+            busy(btn, false); btn.disabled = true;
+            var notes = [];
+            if (tot.customers) {
+              var miss = [nd.noMobile + ' without a mobile number', nd.noAddress + ' without an address', nd.noCity + ' without a city', nd.noSalesperson + ' without a salesperson'].filter(function (x) { return x.charAt(0) !== '0'; });
+              if (!payload.area) miss.push('area to fill in');
+              if (nd.duplicateMobile) miss.push(nd.duplicateMobile + ' sharing a phone number with another shop (kept on the first one)');
+              if (miss.length) notes.push('Customers: ' + esc(miss.join(', ')) + '. <a href="#/customers?incomplete=1">Show customers with details missing</a>');
+            }
+            if (tot.products) notes.push('Products: check <b>units per carton</b>' + (noPrice ? ', and the price of ' + noPrice + ' products that have no price in QuickBooks' : '') + '. <a href="#/products?review=1">Show products to check</a>');
+            $('#impOut', m).innerHTML = '<div class="alert good">Done. Created <b>' + tot.customers + '</b> customers and <b>' + tot.products + '</b> products, all mapped to QuickBooks.</div>' +
+              (notes.length ? '<ul style="font-size:14px">' + notes.map(function (n) { return '<li>' + n + '</li>'; }).join('') + '</ul>' : '');
+            $all('#impOut a', m).forEach(function (a) { a.addEventListener('click', function () { close(); }); });
+          }).catch(function (e) { busy(btn, false); showError(e); });
+        };
+      });
+    }).catch(showError);
+  }
 
   // ---------- delivery: shared helpers ----------
   var TRIP_LABELS = { PLANNED: 'Planned', OUT: 'Out for delivery', COMPLETED: 'Completed', CANCELLED: 'Cancelled' };
