@@ -44,10 +44,40 @@
    *  - screens are answered from the offline pack (own customers, products, own trips) or from the last copy seen online.
    */
   var renderSeq = 0; // increases on every screen change
+  // ---------- instant screens ----------
+  // A screen seen before opens at once from the copy kept on this device, and fresh data is fetched in the background; the
+  // screen is repainted only if something changed and only while the user is not typing or in a dialog. After any change the
+  // user makes (save, approve, deliver...), older copies are not shown any more: the next screen waits for fresh data.
+  var SWR = { 'dashboard.summary': 1, 'customers.list': 1, 'customers.get': 1, 'customers.areas': 1, 'salespersons.options': 1, 'salespersons.list': 1,
+    'products.list': 1, 'products.get': 1, 'categories.list': 1, 'territories.list': 1, 'orders.list': 1, 'orders.get': 1, 'visits.list': 1,
+    'delivery.trips': 1, 'delivery.ready': 1, 'returns.list': 1, 'qb.status': 1, 'qb.queue': 1, 'settings.list': 1, 'users.list': 1, 'roles.list': 1,
+    'fleet.drivers': 1, 'fleet.vehicles': 1, 'commission.rules': 1, 'commission.dashboard': 1 };
+  var SWR_REFRESH_MS = 8000, lastWriteAt = 0, swrInflight = {}, uiTouched = false;
+  function isWriteAction(a) {
+    return a !== 'reports.run' && /\.(save\w*|create\w*|submit|approve|returnToDraft|cancel\w*|closeShort|captureLocation|set\w+|end\w+|decide\w*|pay|close\w*|backfill|retry|generateKey|run|start\w*|finish\w*|confirm|fail|update\w*|review\w*|reset\w*|import\w*|logout|changePassword)$/.test(a);
+  }
+  function uiBusy() { return uiTouched || !!document.querySelector('.modal'); }
+  document.addEventListener('input', function () { uiTouched = true; }, true);
+  document.addEventListener('change', function () { uiTouched = true; }, true);
+
   var API = {
     /** Screen data that arrives after the user has moved on to another screen is dropped, so a slow answer never paints over the newer screen. */
     call: function (action, payload) {
-      var seq = renderSeq, p = API.send(action, payload);
+      var seq = renderSeq;
+      if (SWR[action] && Local.uid && !Net.down()) {
+        var k = stableKey(action, payload || {}), c = Local.cache[k];
+        if (c && c.t && c.t > lastWriteAt) {
+          if (Date.now() - c.t > SWR_REFRESH_MS && !swrInflight[k]) {
+            swrInflight[k] = 1;
+            API.send(action, payload).then(function (d) {
+              delete swrInflight[k];
+              if (seq === renderSeq && !uiBusy() && JSON.stringify(d) !== JSON.stringify(Offline.overlay(action, payload, clone(c.data)))) render({ keepScroll: true });
+            }, function () { delete swrInflight[k]; });
+          }
+          return Promise.resolve(Offline.overlay(action, payload, clone(c.data)));
+        }
+      }
+      var p = API.send(action, payload);
       if (!Offline.isRead(action) || action === 'auth.me') return p;
       var stale = function () { return seq !== renderSeq; };
       return p.then(function (d) { return stale() ? new Promise(function () {}) : d; }, function (e) { if (stale()) return new Promise(function () {}); throw e; });
@@ -62,8 +92,10 @@
       }
       if (q && Net.down()) return Offline.enqueue(action, payload);
       if (!q && Net.down() && Offline.packFirst(action)) { var fast = Offline.read(action, payload); if (fast) { Net.probeSoon(); return fast; } }
+      if (isWriteAction(action)) lastWriteAt = Date.now();
       return rawCall(action, payload, q ? 45000 : (Net.down() ? 8000 : 25000)).then(function (data) {
         Net.up();
+        if (isWriteAction(action)) lastWriteAt = Date.now();
         Offline.afterOnline(action, payload, data, !!q);
         return Offline.overlay(action, payload, data);
       }, function (e) {
@@ -356,7 +388,7 @@
   function estimateOrder(p) {
     var lines = (p.Lines || []).map(function (l) {
       var pr = Pack.product(l.ProductID) || { Name: 'Product', UnitsPerCarton: 1, WholesalePrice: 0, TaxRate: 0, Unit: '' };
-      var pv = previewLine({ product: pr, Cartons: l.Cartons, LooseUnits: l.LooseUnits, DiscountPct: l.DiscountPct });
+      var pv = previewLine({ product: pr, Cartons: l.Cartons, LooseUnits: l.LooseUnits, DiscountPct: l.DiscountPct, DiscountMode: l.DiscountMode, DiscountAmount: l.DiscountAmount });
       return { name: pr.Name, sku: pr.SKU, unit: pr.Unit, qty: pv.qty, cartons: pv.cartons, net: pv.net };
     });
     return { lines: lines, net: Math.round(lines.reduce(function (a, l) { return a + l.net; }, 0) * 100) / 100 };
@@ -455,7 +487,10 @@
             if (seen[l.ProductID]) throw vErr(pr.Name + ' appears twice. Combine it into one line.'); seen[l.ProductID] = 1;
             var q = (Number(l.Cartons) || 0) * pr.UnitsPerCarton + (Number(l.LooseUnits) || 0);
             if (!(q > 0)) throw vErr(pr.Name + ': enter a quantity.');
-            var d = Number(l.DiscountPct) || 0; if (d < 0 || d > 100) throw vErr(pr.Name + ': discount must be between 0 and 100%.');
+            if (l.DiscountMode === 'AMT') {
+              var da = Number(l.DiscountAmount) || 0, lv = Math.round(q * Number(pr.WholesalePrice) * 100) / 100;
+              if (da < 0 || da > lv) throw vErr(pr.Name + ': discount must be between 0 and the line value (PKR ' + lv + ').');
+            } else { var d = Number(l.DiscountPct) || 0; if (d < 0 || d > 100) throw vErr(pr.Name + ': discount must be between 0 and 100%.'); }
           });
         },
         local: function (p, item) {
@@ -631,13 +666,16 @@
     // Copies of these are kept from online use so the screen still opens offline.
     var CACHED = { 'auth.me': 0, 'dashboard.summary': 1, 'customers.list': 1, 'customers.get': 1, 'customers.areas': 1, 'salespersons.options': 1, 'products.list': 1,
       'categories.list': 1, 'orders.list': 1, 'orders.get': 1, 'visits.list': 1, 'delivery.trips': 1, 'delivery.trip': 1, 'returns.list': 1,
-      'commission.report': 1, 'commission.statement': 1, 'territories.list': 1 };
+      'commission.report': 1, 'commission.statement': 1, 'territories.list': 1,
+      // kept for instant screens (see SWR)
+      'salespersons.list': 1, 'products.get': 1, 'delivery.ready': 1, 'qb.status': 1, 'qb.queue': 1, 'settings.list': 1, 'users.list': 1, 'roles.list': 1,
+      'fleet.drivers': 1, 'fleet.vehicles': 1, 'commission.rules': 1, 'commission.dashboard': 1 };
     var PACK_FIRST = { 'customers.list': 1, 'customers.areas': 1, 'customers.get': 1, 'products.list': 1, 'categories.list': 1, 'orders.creditInfo': 1, 'delivery.trip': 1, 'delivery.trips': 1, 'auth.me': 1 };
     var refreshTimer = null;
 
     function remember(action, p, data) {
       var k = stableKey(action, p), keys;
-      Local.cache[k] = { at: new Date().toISOString(), data: data };
+      Local.cache[k] = { at: new Date().toISOString(), t: Date.now(), data: data };
       keys = Object.keys(Local.cache);
       if (keys.length > 80) keys.sort(function (a, b) { return Local.cache[a].at < Local.cache[b].at ? -1 : 1; }).slice(0, keys.length - 80).forEach(function (x) { delete Local.cache[x]; });
       Local.saveCacheSoon();
@@ -1037,7 +1075,7 @@
       var root = shell('Customers', html);
       pg.bind(root);
       function setQ(patch) { var n = Object.assign({}, q, patch); if (!patch.page) n.page = 1; go('customers?' + Object.keys(n).filter(function (k) { return n[k]; }).map(function (k) { return k + '=' + encodeURIComponent(n[k]); }).join('&')); }
-      var t; $('#cq').oninput = function (ev) { clearTimeout(t); t = setTimeout(function () { setQ({ q: ev.target.value }); }, 450); };
+      var t; $('#cq').oninput = function (ev) { clearTimeout(t); var sq = renderSeq; t = setTimeout(function () { if (sq !== renderSeq) return; setQ({ q: ev.target.value }); }, 450); };
       $('#cArea').onchange = function (ev) { setQ({ area: ev.target.value }); };
       if ($('#cSp')) $('#cSp').onchange = function (ev) { setQ({ sp: ev.target.value }); };
       $('#cGps').onchange = function (ev) { setQ({ gps: ev.target.value }); };
@@ -1219,7 +1257,7 @@
       var pg = pager(list, function (p) { setQ({ page: p }); });
       var root = shell('Products', html + pg.html); pg.bind(root);
       function setQ(patch) { var n = Object.assign({}, q, patch); if (!patch.page) n.page = 1; go('products?' + Object.keys(n).filter(function (k) { return n[k]; }).map(function (k) { return k + '=' + encodeURIComponent(n[k]); }).join('&')); }
-      var t; $('#pq').oninput = function (ev) { clearTimeout(t); t = setTimeout(function () { setQ({ q: ev.target.value }); }, 450); };
+      var t; $('#pq').oninput = function (ev) { clearTimeout(t); var sq = renderSeq; t = setTimeout(function () { if (sq !== renderSeq) return; setQ({ q: ev.target.value }); }, 450); };
       $('#pCat').onchange = function (ev) { setQ({ cat: ev.target.value }); };
       if ($('#pNew')) $('#pNew').onclick = function () { productModal(null); };
       $all('[data-i]', root).forEach(function (a) { a.onclick = function () { productModal(list.items[Number(a.dataset.i)]); }; });
@@ -1266,7 +1304,7 @@
       }).join('') + '</ul>' : '<div class="empty card">No salespersons yet.</div>';
       var pg = pager(list, function (p) { go('salespersons?page=' + p + (r.q.q ? '&q=' + encodeURIComponent(r.q.q) : '')); });
       var root = shell('Salespersons', html + pg.html); pg.bind(root);
-      var t; $('#sq').oninput = function (ev) { clearTimeout(t); t = setTimeout(function () { go('salespersons?q=' + encodeURIComponent(ev.target.value)); }, 450); };
+      var t; $('#sq').oninput = function (ev) { clearTimeout(t); var sq = renderSeq; t = setTimeout(function () { if (sq !== renderSeq) return; go('salespersons?q=' + encodeURIComponent(ev.target.value)); }, 450); };
       var open = function (s) {
         var fields = [
           { name: 'Name', label: 'Name', required: true }, { name: 'Code', label: 'Code', hint: s ? '' : 'Leave empty to auto-generate' },
@@ -1304,7 +1342,7 @@
       }).join('') + '</ul>';
       var pg = pager(list, function (p) { go('users?page=' + p); });
       var root = shell('Users', html + pg.html); pg.bind(root);
-      var t; $('#uq').oninput = function (ev) { clearTimeout(t); t = setTimeout(function () { go('users?q=' + encodeURIComponent(ev.target.value)); }, 450); };
+      var t; $('#uq').oninput = function (ev) { clearTimeout(t); var sq = renderSeq; t = setTimeout(function () { if (sq !== renderSeq) return; go('users?q=' + encodeURIComponent(ev.target.value)); }, 450); };
       var open = function (u) {
         var fields = [
           { name: 'FullName', label: 'Full name', required: true }, { name: 'Username', label: 'Username', required: true, hint: 'Lower-case letters, numbers, dot, dash' },
@@ -1398,7 +1436,7 @@
         }).join('')) + '</table>' + (list.items.length ? '' : '<div class="empty">Nothing recorded.</div>') + '</div>';
       var pg = pager(list, function (p) { go('audit?page=' + p + (errors ? '&view=errors' : '') + (q.q ? '&q=' + encodeURIComponent(q.q) : '')); });
       var root = shell('Audit log', html + pg.html); pg.bind(root);
-      var t; if ($('#aq')) $('#aq').oninput = function (ev) { clearTimeout(t); t = setTimeout(function () { go('audit?q=' + encodeURIComponent(ev.target.value)); }, 500); };
+      var t; if ($('#aq')) $('#aq').oninput = function (ev) { clearTimeout(t); var sq = renderSeq; t = setTimeout(function () { if (sq !== renderSeq) return; go('audit?q=' + encodeURIComponent(ev.target.value)); }, 500); };
     }).catch(showError);
   };
 
@@ -1520,7 +1558,7 @@
       var pg = pager(list, function (p) { setQ({ page: p }); });
       var root = shell('Orders', html + pg.html); pg.bind(root);
       function setQ(patch) { var n = Object.assign({}, q, patch); if (!patch.page) n.page = 1; go('orders?' + Object.keys(n).filter(function (k) { return n[k]; }).map(function (k) { return k + '=' + encodeURIComponent(n[k]); }).join('&')); }
-      var t; $('#oq').oninput = function (ev) { clearTimeout(t); t = setTimeout(function () { setQ({ q: ev.target.value }); }, 450); };
+      var t; $('#oq').oninput = function (ev) { clearTimeout(t); var sq = renderSeq; t = setTimeout(function () { if (sq !== renderSeq) return; setQ({ q: ev.target.value }); }, 450); };
       $('#oSt').onchange = function (ev) { setQ({ status: ev.target.value, credit: '' }); };
       $('#oFrom').onchange = function (ev) { setQ({ from: ev.target.value }); };
       $('#oTo').onchange = function (ev) { setQ({ to: ev.target.value }); };
@@ -1528,12 +1566,17 @@
     }).catch(showError);
   };
 
+  /** Line discount as the server calculates it: PKR for the whole line ('AMT') or a percentage ('PCT'). */
+  function lineDiscount(l, gross) {
+    if (l.DiscountMode === 'AMT') return Math.min(Math.round((Number(l.DiscountAmount) || 0) * 100) / 100, gross);
+    return gross * (Number(l.DiscountPct) || 0) / 100;
+  }
   /** Mirrors the server formula for an on-screen estimate. The server recalculates and its figures are final. */
   function previewLine(l) {
     var p = l.product, upc = Number(p.UnitsPerCarton), qty = (Number(l.Cartons) || 0) * upc + (Number(l.LooseUnits) || 0);
-    var gross = qty * Number(p.WholesalePrice), disc = gross * (Number(l.DiscountPct) || 0) / 100, tax = (gross - disc) * (Number(p.TaxRate) || 0) / 100;
     var r2 = function (n) { return Math.round((n + Number.EPSILON) * 100) / 100; };
-    return { qty: qty, cartons: qty / upc, gross: r2(gross), disc: r2(disc), tax: r2(tax), net: r2(r2(gross) - r2(disc) + r2(tax)) };
+    var gross = r2(qty * Number(p.WholesalePrice)), disc = lineDiscount(l, gross), tax = (gross - r2(disc)) * (Number(p.TaxRate) || 0) / 100;
+    return { qty: qty, cartons: qty / upc, gross: gross, disc: r2(disc), tax: r2(tax), net: r2(gross - r2(disc) + r2(tax)) };
   }
 
   function orderForm(o, q) {
@@ -1542,7 +1585,8 @@
       lines: o ? o.Lines.map(function (l) {
         var upc = l.UnitsPerCarton, full = Math.floor(l.Quantity / upc + 1e-9);
         return { product: { ProductID: l.ProductID, Name: l.ProductName, SKU: l.SKU, Unit: l.Unit, UnitsPerCarton: upc, WholesalePrice: l.Rate, TaxRate: l.TaxRate },
-          Cartons: full, LooseUnits: Math.round((l.Quantity - full * upc) * 1000) / 1000, DiscountPct: l.DiscountPct };
+          Cartons: full, LooseUnits: Math.round((l.Quantity - full * upc) * 1000) / 1000,
+          DiscountMode: l.DiscountMode === 'PCT' ? 'PCT' : 'AMT', DiscountPct: l.DiscountPct, DiscountAmount: l.DiscountMode === 'PCT' ? '' : (l.DiscountAmount || 0) };
       }) : [],
       gps: null, credit: null
     };
@@ -1603,7 +1647,7 @@
             $all('[data-p]', $('#prodResults', root)).forEach(function (a) { a.onclick = function () {
               var p = res.items[Number(a.dataset.p)];
               if (st.lines.some(function (l) { return l.product.ProductID === p.ProductID; })) { toast(p.Name + ' is already in the order.'); return; }
-              st.lines.push({ product: p, Cartons: 1, LooseUnits: 0, DiscountPct: 0 });
+              st.lines.push({ product: p, Cartons: 1, LooseUnits: 0, DiscountMode: 'AMT', DiscountAmount: 0, DiscountPct: 0 });
               inp.value = ''; $('#prodResults', root).innerHTML = ''; drawLines();
             }; });
           }).catch(showError);
@@ -1617,13 +1661,20 @@
         var pv = previewLine(l);
         return '<div class="card" style="padding:12px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;gap:8px"><div><b>' + esc(l.product.Name) + '</b><div style="font-size:13px;color:var(--muted)">' + esc(l.product.SKU) + ' · ' + money(l.product.WholesalePrice) + ' / ' + esc(l.product.Unit) + ' · ' + l.product.UnitsPerCarton + ' per carton</div></div>' +
           '<button class="btn danger" data-rm="' + i + '" aria-label="Remove" style="min-height:36px;padding:0 10px">✕</button></div>' +
-          '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px">' +
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">' +
           '<label style="font-size:13px">Cartons<input type="number" inputmode="numeric" min="0" step="1" data-f="Cartons" data-i="' + i + '" value="' + esc(l.Cartons) + '"></label>' +
           '<label style="font-size:13px">Loose ' + esc(l.product.Unit) + '<input type="number" inputmode="decimal" min="0" step="any" data-f="LooseUnits" data-i="' + i + '" value="' + esc(l.LooseUnits) + '"></label>' +
-          '<label style="font-size:13px">Disc. %<input type="number" inputmode="decimal" min="0" max="100" step="any" data-f="DiscountPct" data-i="' + i + '" value="' + esc(l.DiscountPct) + '"></label></div>' +
+          '<label style="font-size:13px;grid-column:span 2">Discount (' + (l.DiscountMode === 'PCT' ? '% of the line' : 'PKR for the whole line') + ')<span style="display:flex;gap:6px">' +
+            (l.DiscountMode === 'PCT'
+              ? '<input type="number" inputmode="decimal" min="0" max="100" step="any" data-f="DiscountPct" data-i="' + i + '" value="' + esc(l.DiscountPct) + '" style="min-width:0;flex:1">'
+              : '<input type="number" inputmode="decimal" min="0" step="any" data-f="DiscountAmount" data-i="' + i + '" value="' + esc(l.DiscountAmount) + '" style="min-width:0;flex:1">') +
+            '<select data-dm="' + i + '" aria-label="Discount in" style="width:90px;flex:none"><option value="AMT"' + (l.DiscountMode !== 'PCT' ? ' selected' : '') + '>PKR</option><option value="PCT"' + (l.DiscountMode === 'PCT' ? ' selected' : '') + '>%</option></select></span></label></div>' +
           '<div style="font-size:13px;margin-top:6px;color:var(--muted)" data-pv="' + i + '">' + pvText(pv) + '</div></div>';
       }).join('') : '<div class="empty">No products added yet. Search above to add.</div>';
       $all('[data-rm]', box).forEach(function (b) { b.onclick = function () { st.lines.splice(Number(b.dataset.rm), 1); drawLines(); }; });
+      $all('[data-dm]', box).forEach(function (sel) { sel.onchange = function () {
+        var l = st.lines[Number(sel.dataset.dm)]; l.DiscountMode = sel.value; l.DiscountPct = 0; l.DiscountAmount = 0; drawLines(); drawTotals();
+      }; });
       $all('[data-f]', box).forEach(function (inp) { inp.oninput = function () {
         var l = st.lines[Number(inp.dataset.i)]; l[inp.dataset.f] = inp.value;
         $('[data-pv="' + inp.dataset.i + '"]', box).innerHTML = pvText(previewLine(l)); drawTotals();
@@ -1632,7 +1683,7 @@
     }
     function pvText(pv) { return '= ' + (Math.round(pv.qty * 1000) / 1000) + ' units (' + (Math.round(pv.cartons * 100) / 100) + ' ctn) · Net <b>' + money(pv.net) + '</b>'; }
 
-    var creditTimer;
+    var creditTimer, creditSeq = 0;
     function drawTotals() {
       var t = { gross: 0, disc: 0, tax: 0, net: 0 };
       st.lines.forEach(function (l) { var pv = previewLine(l); t.gross += pv.gross; t.disc += pv.disc; t.tax += pv.tax; t.net += pv.net; });
@@ -1640,15 +1691,17 @@
       box.innerHTML = '<dl class="kv"><dt>Gross</dt><dd>' + money(t.gross) + '</dd><dt>Discount</dt><dd>' + money(t.disc) + '</dd><dt>Tax</dt><dd>' + money(t.tax) + '</dd><dt><b>Net amount</b></dt><dd style="font-size:20px;font-weight:700">' + money(t.net) + '</dd></dl>';
       clearTimeout(creditTimer);
       creditTimer = setTimeout(function () {
+        var mine = ++creditSeq; // an older answer arriving late must not replace a newer one
         API.call('orders.creditInfo', { CustomerID: st.customer.CustomerID, OrderID: o ? o.OrderID : '', Amount: Math.round(t.net * 100) / 100 })
-          .then(function (cr) { var cb = $('#credBox', root); if (cb) cb.innerHTML = '<h2 style="font-size:15px;margin:12px 0 8px">Credit</h2>' + creditPanel(cr); }).catch(function () {});
+          .then(function (cr) { if (mine !== creditSeq) return; var cb = $('#credBox', root); if (cb) cb.innerHTML = '<h2 style="font-size:15px;margin:12px 0 8px">Credit</h2>' + creditPanel(cr); }).catch(function () {});
       }, 500);
     }
 
     function send(submit, btn) {
       if (!st.lines.length) return toast('Add at least one product.', true);
       var payload = { CustomerID: st.customer.CustomerID, Remarks: st.remarks, VisitID: st.visitId, submit: submit,
-        Lines: st.lines.map(function (l) { return { ProductID: l.product.ProductID, Cartons: l.Cartons || 0, LooseUnits: l.LooseUnits || 0, DiscountPct: l.DiscountPct || 0 }; }) };
+        Lines: st.lines.map(function (l) { return { ProductID: l.product.ProductID, Cartons: l.Cartons || 0, LooseUnits: l.LooseUnits || 0,
+          DiscountMode: l.DiscountMode === 'PCT' ? 'PCT' : 'AMT', DiscountPct: l.DiscountMode === 'PCT' ? (l.DiscountPct || 0) : 0, DiscountAmount: l.DiscountMode === 'PCT' ? 0 : (l.DiscountAmount || 0) }; }) };
       if (o) { payload.OrderID = o.OrderID; payload.Version = o.Version; } else payload.ClientUUID = st.clientUUID;
       if (st.gps) { payload.Latitude = st.gps.lat; payload.Longitude = st.gps.lng; payload.GPSAccuracy = st.gps.accuracy; }
       busy(btn, true);
@@ -1747,7 +1800,7 @@
       (o.Remarks ? '<dt>Remarks</dt><dd>' + esc(o.Remarks) + '</dd>' : '') + '</dl></div>';
 
     html += '<div class="card scroll-x"><h2>Items</h2><table class="tbl"><tr><th>Product</th><th>Qty</th><th class="hide-sm">Ctn</th><th class="hide-sm">Rate</th><th class="hide-sm">Disc</th><th class="hide-sm">Tax</th><th style="text-align:right">Net</th></tr>' +
-      o.Lines.map(function (l) { return '<tr><td>' + esc(l.ProductName) + '<br><small>' + esc(l.SKU) + ' · ' + money(l.Rate) + (l.DiscountPct ? ' · ' + l.DiscountPct + '% off' : '') + '</small></td><td>' + l.Quantity + ' ' + esc(l.Unit) + '<br><small>' + l.Cartons + ' ctn</small></td><td class="hide-sm">' + l.Cartons + '</td><td class="hide-sm">' + money(l.Rate) + '</td><td class="hide-sm">' + (l.DiscountPct ? l.DiscountPct + '%' : '') + '</td><td class="hide-sm">' + (l.TaxRate ? l.TaxRate + '%' : '') + '</td><td style="text-align:right;white-space:nowrap">' + money(l.NetAmount) + '</td></tr>'; }).join('') +
+      o.Lines.map(function (l) { return '<tr><td>' + esc(l.ProductName) + '<br><small>' + esc(l.SKU) + ' · ' + money(l.Rate) + (Number(l.DiscountAmount) ? ' · ' + (l.DiscountMode === 'AMT' ? money(l.DiscountAmount) : l.DiscountPct + '%') + ' off' : '') + '</small></td><td>' + l.Quantity + ' ' + esc(l.Unit) + '<br><small>' + l.Cartons + ' ctn</small></td><td class="hide-sm">' + l.Cartons + '</td><td class="hide-sm">' + money(l.Rate) + '</td><td class="hide-sm">' + (Number(l.DiscountAmount) ? money(l.DiscountAmount) + (l.DiscountMode === 'AMT' ? '' : '<br><small>' + l.DiscountPct + '%</small>') : '') + '</td><td class="hide-sm">' + (l.TaxRate ? l.TaxRate + '%' : '') + '</td><td style="text-align:right;white-space:nowrap">' + money(l.NetAmount) + '</td></tr>'; }).join('') +
       '</table><dl class="kv" style="margin-top:12px"><dt>Gross</dt><dd>' + money(o.GrossAmount) + '</dd><dt>Discount</dt><dd>' + money(o.DiscountAmount) + '</dd><dt>Tax</dt><dd>' + money(o.TaxAmount) + '</dd><dt><b>Net amount</b></dt><dd style="font-size:20px;font-weight:700">' + money(o.NetAmount) + '</dd></dl></div>';
 
     if (o.Credit) html += '<div class="card"><h2>Credit</h2>' + creditPanel(o.Credit) + '</div>';
@@ -1882,7 +1935,7 @@
       }).join('') + '</ul>' : '<div class="empty card">Nothing here.</div>';
       var pg = pager(list, function (p) { go('quickbooks?page=' + p + (q.status ? '&status=' + q.status : '') + (q.q ? '&q=' + encodeURIComponent(q.q) : '')); });
       var root = shell('QuickBooks', html + pg.html); pg.bind(root);
-      var t; $('#qbSearch').oninput = function (ev) { clearTimeout(t); t = setTimeout(function () { go('quickbooks?' + (q.status ? 'status=' + q.status + '&' : '') + 'q=' + encodeURIComponent(ev.target.value)); }, 450); };
+      var t; $('#qbSearch').oninput = function (ev) { clearTimeout(t); var sq = renderSeq; t = setTimeout(function () { if (sq !== renderSeq) return; go('quickbooks?' + (q.status ? 'status=' + q.status + '&' : '') + 'q=' + encodeURIComponent(ev.target.value)); }, 450); };
       $all('[data-retry]', root).forEach(function (bt) { bt.onclick = function () {
         var x = list.items[Number(bt.dataset.retry)]; busy(bt, true);
         API.call('qb.retry', { QueueID: x.QueueID }).then(function () { toast(x.OrderNo + ' queued again.'); render(); }).catch(function (e) { busy(bt, false); showError(e); });
@@ -2076,7 +2129,7 @@
       f.VehicleID.onchange = function () { var v = dv[f.VehicleID.value]; if (v && v.DefaultDriverID && !f.DriverID.value) f.DriverID.value = v.DefaultDriverID; if (v && v.DefaultHelper && !f.Helper.value) f.Helper.value = v.DefaultHelper; updateSum(); };
       $all('[data-o]', root).forEach(function (cb) { cb.onchange = function () { if (cb.checked) sel[cb.dataset.o] = 1; else delete sel[cb.dataset.o]; updateSum(); }; });
       $('#plAll', root).onclick = function () { $all('[data-o]', root).forEach(function (cb) { cb.checked = true; sel[cb.dataset.o] = 1; }); updateSum(); };
-      var t; $('#plq', root).oninput = function (ev) { clearTimeout(t); t = setTimeout(function () { go('planning?q=' + encodeURIComponent(ev.target.value) + (q.area ? '&area=' + encodeURIComponent(q.area) : '')); }, 450); };
+      var t; $('#plq', root).oninput = function (ev) { clearTimeout(t); var sq = renderSeq; t = setTimeout(function () { if (sq !== renderSeq) return; go('planning?q=' + encodeURIComponent(ev.target.value) + (q.area ? '&area=' + encodeURIComponent(q.area) : '')); }, 450); };
       $('#plArea', root).onchange = function (ev) { go('planning?area=' + encodeURIComponent(ev.target.value)); };
       f.onsubmit = function (ev) {
         ev.preventDefault();
@@ -2572,7 +2625,7 @@
         $('#cProd', root).onchange = function (ev) { setQ({ product: ev.target.value, page: '' }); };
         $('#cStatus', root).onchange = function (ev) { setQ({ status: ev.target.value, page: '' }); };
         $('#cGroup', root).onchange = function (ev) { setQ({ group: ev.target.value, page: '' }); };
-        var t; $('#cArea', root).oninput = function (ev) { clearTimeout(t); t = setTimeout(function () { setQ({ area: ev.target.value, page: '' }); }, 600); };
+        var t; $('#cArea', root).oninput = function (ev) { clearTimeout(t); var sq = renderSeq; t = setTimeout(function () { if (sq !== renderSeq) return; setQ({ area: ev.target.value, page: '' }); }, 600); };
         $all('[data-drill]', root).forEach(function (a) { a.onclick = function () {
           var x = res.summary[Number(a.dataset.drill)], p = { page: '' };
           if (group === 'salesperson') p.sp = x.Key; else if (group === 'product') p.product = x.Key; else if (group === 'customer') p.customer = x.Key;
@@ -3210,16 +3263,18 @@
   };
 
   // ---------- boot ----------
-  function render() {
+  function render(opts) {
     if (!State.token) return renderLogin();
     if (!State.me) return boot();
     if (State.me.mustChangePassword) return renderChangePassword(true);
-    renderSeq++;
+    renderSeq++; uiTouched = false;
+    var keepY = opts && opts.keepScroll ? window.scrollY : null;
     var r = parseHash(), name = r.seg[0] || 'home';
     var nav = NAV.find(function (n) { return n.path === name; });
     if (!VIEWS[name] || (nav && !(nav.routePerm ? can(nav.routePerm) : navAllowed(nav)))) { go('home'); return; }
-    window.scrollTo(0, 0);
+    if (keepY === null) window.scrollTo(0, 0);
     VIEWS[name](r);
+    if (keepY !== null) setTimeout(function () { window.scrollTo(0, keepY); }, 0);
   }
 
   function boot() {
