@@ -1054,7 +1054,7 @@
     var q = r.q, page = Number(q.page) || 1;
     loading('Customers');
     loadCustOptions().then(function () {
-      return API.call('customers.list', { q: q.q, area: q.area, salespersonId: q.sp, active: q.active, gps: q.gps, qb: q.qb, incomplete: q.incomplete, page: page });
+      return API.call('customers.list', { q: q.q, area: q.area, salespersonId: q.sp, active: q.active, gps: q.gps, qb: q.qb, incomplete: q.incomplete, qbcreate: q.qbcreate, page: page });
     }).then(function (res) {
       var canCreate = can(['customers.manage', 'customers.create.own']);
       var html = '<div class="toolbar"><input type="search" class="search" id="cq" placeholder="Search name, code, phone, area" value="' + esc(q.q || '') + '">' +
@@ -1064,6 +1064,7 @@
         '<select id="cAct"><option value="">Active + inactive</option><option value="true"' + (q.active === 'true' ? ' selected' : '') + '>Active</option><option value="false"' + (q.active === 'false' ? ' selected' : '') + '>Inactive</option></select>' +
         (canCreate ? '<a class="btn primary" href="#/customers/new">+ New customer</a>' : '') + '</div>';
       if (q.qb === 'unmapped') html += '<div class="alert warn">Showing customers not mapped to QuickBooks. <a href="#/customers">Clear</a></div>';
+      if (q.qbcreate === 'failed') html += '<div class="alert bad">Customers that could not be created in QuickBooks. Open each one to see why, fix it (for example the name), then press <b>Create in QuickBooks</b>. <a href="#/customers">Clear</a></div>';
       if (q.incomplete === '1') html += '<div class="alert warn">Showing customers with details still missing (mobile, address, area, city or salesperson). Open each one and press Edit. <a href="#/customers">Clear</a></div>';
       if (!res.items.length) html += '<div class="empty card">No customers found.</div>';
       else html += '<ul class="list">' + res.items.map(function (c) {
@@ -1089,6 +1090,16 @@
     API.call('customers.get', { CustomerID: id }).then(function (c) { drawCustomer(c); }).catch(function (e) { showError(e); go('customers'); });
   }
 
+  /** Where the customer stands with QuickBooks: linked, being created by the bridge, or a problem to fix. */
+  function qbCustomerState(c) {
+    if (c.QBListID && (!c.QBCreateStatus || c.QBCreateStatus === 'SYNCED')) return esc(c.QBFullName) + ' <span class="badge good">Linked</span>';
+    var st = c.QBCreateStatus;
+    if (st === 'PENDING' || st === 'IN_PROGRESS') return '<span class="badge warn">Being created in QuickBooks</span> <small>by the bridge on the QuickBooks PC</small>';
+    if (st === 'FAILED') return '<span class="badge warn">Retrying</span> <small>' + esc(c.QBCreateError) + '</small>';
+    if (st === 'EXCEPTION') return '<span class="badge bad">Could not create in QuickBooks</span><br><small>' + esc(c.QBCreateError) + '</small>';
+    return '<span class="badge warn">Not linked</span>';
+  }
+
   function drawCustomer(c) {
     var hasGps = typeof c.Latitude === 'number' && c.Latitude !== '';
     var html = '<div class="card"><div style="display:flex;justify-content:space-between;gap:8px;align-items:start"><div><h2 style="margin:0">' + esc(c.ShopName) + '</h2><div style="color:var(--muted)">' + esc(c.Code) + '</div></div>' + badge(c.Active) + '</div>' +
@@ -1097,10 +1108,11 @@
       '<dt>Address</dt><dd>' + esc(c.Address) + '</dd><dt>Area / City</dt><dd>' + esc(c.Area) + ', ' + esc(c.City) + '</dd><dt>Salesperson</dt><dd>' + esc(c.SalespersonName) + '</dd>' +
       '<dt>Type</dt><dd>' + esc(c.CustomerType) + '</dd><dt>Credit limit</dt><dd>' + money(c.CreditLimit) + '</dd><dt>Payment terms</dt><dd>' + esc(c.PaymentTerms) + '</dd>' +
       '<dt>Outstanding</dt><dd>' + (c.QBBalanceAsOf ? money(c.QBBalance) + ' <span class="badge">as of ' + fmtDate(c.QBBalanceAsOf) + '</span>' : '<span class="badge">Not synced from QuickBooks yet</span>') + '</dd>' +
-      '<dt>QuickBooks</dt><dd>' + (c.QBListID ? esc(c.QBFullName) + ' <span class="badge good">Mapped</span>' : '<span class="badge warn">Not mapped</span>') + '</dd>' +
+      '<dt>QuickBooks</dt><dd>' + qbCustomerState(c) + '</dd>' +
       (c.Notes ? '<dt>Notes</dt><dd>' + esc(c.Notes) + '</dd>' : '') + '</dl>' +
       '<div class="btn-row">' + (can(['customers.manage', 'customers.create.own']) ? '<a class="btn" href="#/customers/' + encodeURIComponent(c.CustomerID) + '/edit">Edit</a>' : '') +
       (c.CanMapQB ? '<button class="btn" id="qbMap">QuickBooks mapping</button>' : '') +
+      (c.CanCreateInQB ? '<button class="btn" id="qbCreate">Create in QuickBooks</button>' : '') +
       (can(['orders.view.all', 'orders.view.own']) && !c.LocalPending ? '<a class="btn" href="#/reports/statement?customerId=' + encodeURIComponent(c.CustomerID) + '&customerName=' + encodeURIComponent(c.ShopName) + '">Statement</a>' : '') + '</div>' +
       ((can('visits.create') || can('orders.create')) && c.Active ? '<div class="btn-row">' + (can('visits.create') ? '<button class="btn" id="visitBtn">📍 Record visit</button>' : '') +
         (can('orders.create') ? '<a class="btn primary" href="#/orders/new?customer=' + encodeURIComponent(c.CustomerID) + '">+ New order</a>' : '') + '</div>' : '') + '</div>';
@@ -1121,6 +1133,11 @@
     shell(c.ShopName, html, { back: 'customers' });
     if ($('#capBtn')) $('#capBtn').onclick = function () { captureFlow(c); };
     if ($('#qbMap')) $('#qbMap').onclick = function () { qbMapModal('customer', c); };
+    if ($('#qbCreate')) $('#qbCreate').onclick = function () {
+      var b = this; busy(b, true);
+      API.call('customers.createInQb', { CustomerID: c.CustomerID }).then(function () { toast('The QuickBooks bridge will create ' + c.ShopName + ' in QuickBooks within a minute or two.'); render(); })
+        .catch(function (e) { busy(b, false); showError(e); });
+    };
     if ($('#visitBtn')) $('#visitBtn').onclick = function () { visitModal(c); };
   }
 
@@ -1193,7 +1210,7 @@
         var send = function (extra) {
           busy(b, true);
           return API.call('customers.save', Object.assign(data, extra || {})).then(function (saved) {
-            custOpts.areas = null; toast('Customer saved.'); go('customers/' + encodeURIComponent(saved.CustomerID));
+            custOpts.areas = null; toast(!c && saved.QBCreateStatus === 'PENDING' ? 'Customer saved. It will be created in QuickBooks automatically.' : 'Customer saved.'); go('customers/' + encodeURIComponent(saved.CustomerID));
           }).catch(function (e) {
             busy(b, false);
             if (e.code === 'DUPLICATE') return confirmBox('Possible duplicate', e.message, 'Save anyway').then(function (yes) { if (yes) send({ confirmDuplicate: true }); });
@@ -1210,8 +1227,7 @@
     var name = isC ? rec.ShopName : rec.Name;
     modal('QuickBooks mapping — ' + name, '<p class="hint" style="font-size:13px;color:var(--muted)">Pick the matching QuickBooks ' + (isC ? 'customer' : 'item') + '. The list comes from the QuickBooks bridge (refreshed hourly). Match on the exact record — never a look-alike name.</p>' +
       '<input type="search" id="qbq" placeholder="Search QuickBooks ' + (isC ? 'customers' : 'items') + '" value="' + esc(rec.QBFullName || name) + '" autocomplete="off"><ul class="list" id="qbres" style="margin:8px 0 14px;max-height:260px;overflow:auto"></ul>' +
-      '<div class="field"><label>QuickBooks ListID</label><input type="text" id="qbl" value="' + esc(rec.QBListID) + '" placeholder="chosen from the list above"><div class="ferr" data-err="QBListID"></div></div>' +
-      '<div class="field"><label>QuickBooks full name</label><input type="text" id="qbn" value="' + esc(rec.QBFullName) + '"><div class="ferr" data-err="QBFullName"></div></div>' +
+      '<div class="field"><label>Chosen QuickBooks ' + (isC ? 'customer' : 'item') + '</label><input type="text" id="qbn" value="' + esc(rec.QBFullName) + '" readonly placeholder="pick one from the list above" style="background:var(--bg)"><input type="hidden" id="qbl" value="' + esc(rec.QBListID) + '"><div class="ferr" data-err="QBListID"></div><div class="ferr" data-err="QBFullName"></div></div>' +
       '<div class="btn-row"><button class="btn primary" id="qbs">Save mapping</button>' + (rec.QBListID ? '<button class="btn danger" id="qbx">Remove mapping</button>' : '') + '<button class="btn" id="qbc">Cancel</button></div>', function (m, close) {
         $('#qbc', m).onclick = close;
         var t, search = function () {
@@ -1915,6 +1931,13 @@
         '<dt>Lists imported</dt><dd>' + st.lists.customers + ' customers, ' + st.lists.items + ' items' + (st.listsUpdatedAt ? ' · ' + fmtDate(st.listsUpdatedAt) : '') + '</dd>' +
         '<dt>Bridge key</dt><dd>' + (st.keyCreatedAt ? 'created ' + fmtDate(st.keyCreatedAt) : '<span class="badge warn">not generated</span>') + '</dd></dl>' +
         (st.canGenerateKey ? '<div class="btn-row"><button class="btn" id="genKey">' + (st.keyCreatedAt ? 'Replace bridge key' : 'Generate bridge key') + '</button></div>' : '') + '</div>';
+      var cc = st.customerCreate || { waiting: 0, failed: 0, unlinked: 0 };
+      if (can('customers.qbmap') && (cc.waiting || cc.failed || cc.unlinked)) html += '<div class="card"><h2>Customers created in the app</h2>' +
+        '<p style="font-size:14px;color:var(--muted)">New customers are created in QuickBooks by the bridge (shop name, contact, phone, address; the Prosol customer code is the QuickBooks <i>Account No.</i>). Their orders follow automatically.</p><dl class="kv">' +
+        '<dt>Waiting for the bridge</dt><dd>' + cc.waiting + '</dd>' +
+        '<dt>Could not be created</dt><dd>' + (cc.failed ? '<a href="#/customers?qbcreate=failed">' + cc.failed + ' — open to see why</a>' : '0') + '</dd>' +
+        '<dt>Not linked to QuickBooks</dt><dd>' + cc.unlinked + '</dd></dl>' +
+        (cc.unlinked ? '<div class="btn-row"><button class="btn primary" id="qbCreateAll">Create ' + cc.unlinked + ' unlinked customer(s) in QuickBooks</button></div>' : '') + '</div>';
       if (can(['customers.manage', 'products.manage'])) html += '<div class="card"><h2>Create customers and products from QuickBooks</h2>' +
         '<p style="font-size:14px;color:var(--muted)">Creates a Prosol customer for every active QuickBooks customer, and a Prosol product for the QuickBooks items you choose, already mapped. Records that are already mapped are skipped, so it is safe to run again after new customers or items are added in QuickBooks. Nothing is changed in QuickBooks.</p>' +
         (st.lists.customers + st.lists.items ? '<div class="btn-row"><button class="btn primary" id="qbImp">Preview</button></div>' :
@@ -1949,6 +1972,12 @@
         }).catch(showError);
       }; });
       if ($('#qbImp', root)) $('#qbImp', root).onclick = function () { qbImportDialog(); };
+      if ($('#qbCreateAll', root)) $('#qbCreateAll', root).onclick = function () {
+        confirmBox('Create in QuickBooks', 'Every active customer that is not linked to QuickBooks will be created there by the bridge, with the Prosol customer code as Account No. Customers whose name already exists in QuickBooks get the code added to the name. Continue?', 'Create').then(function (y) {
+          if (!y) return;
+          API.call('qb.createUnmappedCustomers').then(function (r) { toast(r.queued + ' customer(s) queued for QuickBooks.'); render(); }).catch(showError);
+        });
+      };
       if ($('#genKey', root)) $('#genKey', root).onclick = function () {
         confirmBox('Bridge key', st.keyCreatedAt ? 'Replacing the key disconnects the running bridge until the new key is pasted into it (ProsolQBBridge.exe --setup). Continue?' : 'Generate the key that the QuickBooks bridge uses to connect?', 'Generate').then(function (y) {
           if (!y) return;
