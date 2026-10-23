@@ -3413,7 +3413,7 @@
       '<div class="card"><h2>Database size</h2><p style="font-size:14px;color:var(--muted)">The database is on Supabase (Postgres). All history stays in one database; nothing needs archiving.</p>' +
       '<dl class="kv"><dt>Live database</dt><dd>' + capBar(hl.main.pct) + hl.main.pct + '% · ' + mb(hl.main.bytes) + ' of ' + mb(hl.limit) + '</dd>' +
       '<dt>Orders</dt><dd>' + (hl.main.orders || 0).toLocaleString() + (hl.main.firstOrder ? ' since ' + fmtDate(hl.main.firstOrder + 'T12:00:00Z', false) : '') + '</dd>' +
-      '<dt>Backups</dt><dd>Made by Supabase every day (Pro plan) — Supabase dashboard → Database → Backups</dd></dl></div>' +
+      '<dt>Backups</dt><dd>Only on the Supabase Pro plan (daily, kept 7 days; Supabase dashboard → Database → Backups). The Free plan has NO automatic backups.</dd></dl></div>' +
       '<div class="card"><h2>Archive</h2><p>' + esc(hl.archive && hl.archive.message || 'No archive is needed.') + '</p></div>';
     shell('System & archive', html);
   }
