@@ -952,7 +952,9 @@
 
   // ---------- views: auth ----------
   function renderLogin(msg) {
-    if (!hasGsr && !/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(CONFIG.apiUrl || '') && CONFIG.apiUrl !== '/api') {
+    // the server: the Apps Script web app, the Supabase function (item D), or the local test server
+    if (!hasGsr && !/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(CONFIG.apiUrl || '') &&
+        !/^https:\/\/[a-z0-9]{20}\.supabase\.co\/functions\/v1\/api$/.test(CONFIG.apiUrl || '') && CONFIG.apiUrl !== '/api') {
       $('#root').innerHTML = '<div class="login-wrap"><div class="login-card"><div class="logo">PROSOL FOODS</div><div class="card"><h2>Setup not finished</h2>' +
         '<p>This copy of the app does not know the server address yet. In <b>config.js</b>, replace the placeholder with the Apps Script web-app URL (ends with <code>/exec</code>) — see DEPLOY.md section 9.</p></div></div></div>';
       return;
