@@ -388,7 +388,7 @@
   function estimateOrder(p) {
     var lines = (p.Lines || []).map(function (l) {
       var pr = Pack.product(l.ProductID) || { Name: 'Product', UnitsPerCarton: 1, WholesalePrice: 0, TaxRate: 0, Unit: '' };
-      var pv = previewLine({ product: pr, Cartons: l.Cartons, LooseUnits: l.LooseUnits, DiscountPct: l.DiscountPct, DiscountMode: l.DiscountMode, DiscountAmount: l.DiscountAmount });
+      var pv = previewLine({ product: pr, Cartons: l.Cartons, LooseUnits: l.LooseUnits, CartonPrice: l.CartonPrice, DiscountPct: l.DiscountPct, DiscountMode: l.DiscountMode, DiscountAmount: l.DiscountAmount });
       return { name: pr.Name, sku: pr.SKU, unit: pr.Unit, qty: pv.qty, cartons: pv.cartons, net: pv.net };
     });
     return { lines: lines, net: Math.round(lines.reduce(function (a, l) { return a + l.net; }, 0) * 100) / 100 };
@@ -487,8 +487,10 @@
             if (seen[l.ProductID]) throw vErr(pr.Name + ' appears twice. Combine it into one line.'); seen[l.ProductID] = 1;
             var q = (Number(l.Cartons) || 0) * pr.UnitsPerCarton + (Number(l.LooseUnits) || 0);
             if (!(q > 0)) throw vErr(pr.Name + ': enter a quantity.');
+            var cp = l.CartonPrice === undefined || l.CartonPrice === '' || l.CartonPrice === null ? null : Number(l.CartonPrice);
+            if (cp !== null && !(cp > 0)) throw vErr(pr.Name + ': enter the price per carton.');
             if (l.DiscountMode === 'AMT') {
-              var da = Number(l.DiscountAmount) || 0, lv = Math.round(q * Number(pr.WholesalePrice) * 100) / 100;
+              var da = Number(l.DiscountAmount) || 0, lv = Math.round(q * (cp === null ? Number(pr.WholesalePrice) : cp / pr.UnitsPerCarton) * 100) / 100;
               if (da < 0 || da > lv) throw vErr(pr.Name + ': discount must be between 0 and the line value (PKR ' + lv + ').');
             } else { var d = Number(l.DiscountPct) || 0; if (d < 0 || d > 100) throw vErr(pr.Name + ': discount must be between 0 and 100%.'); }
           });
@@ -601,6 +603,7 @@
         var q = String(p.q || '').toLowerCase().trim();
         var rows = Local.pack.customers.map(overlayCustomer).filter(function (c) {
           if (p.active === 'false') return false;
+          if (p.mine === '1' && c.Mine === false) return false;
           if (p.area && c.Area !== p.area) return false;
           if (p.gps === 'captured' && !c.HasGPS) return false;
           if (p.gps === 'missing' && c.HasGPS) return false;
@@ -1054,11 +1057,13 @@
     var q = r.q, page = Number(q.page) || 1;
     loading('Customers');
     loadCustOptions().then(function () {
-      return API.call('customers.list', { q: q.q, area: q.area, salespersonId: q.sp, active: q.active, gps: q.gps, qb: q.qb, incomplete: q.incomplete, qbcreate: q.qbcreate, page: page });
+      return API.call('customers.list', { q: q.q, area: q.area, salespersonId: q.sp, mine: q.mine, active: q.active, gps: q.gps, qb: q.qb, incomplete: q.incomplete, qbcreate: q.qbcreate, page: page });
     }).then(function (res) {
       var canCreate = can(['customers.manage', 'customers.create.own']);
       var html = '<div class="toolbar"><input type="search" class="search" id="cq" placeholder="Search name, code, phone, area" value="' + esc(q.q || '') + '">' +
         '<select id="cArea"><option value="">All areas</option>' + (custOpts.areas || []).map(function (a) { return '<option' + (a === q.area ? ' selected' : '') + '>' + esc(a) + '</option>'; }).join('') + '</select>' +
+        // salespersons see every shop; "My shops" narrows to the ones assigned to them
+        (State.me && State.me.salespersonId && !can('customers.view.all') ? '<select id="cMine" aria-label="Which shops"><option value="">All shops</option><option value="1"' + (q.mine === '1' ? ' selected' : '') + '>My shops</option></select>' : '') +
         (custOpts.sp ? '<select id="cSp"><option value="">All salespersons</option>' + custOpts.sp.map(function (s) { return '<option value="' + esc(s.id) + '"' + (s.id === q.sp ? ' selected' : '') + '>' + esc(s.label) + '</option>'; }).join('') + '</select>' : '') +
         '<select id="cGps"><option value="">GPS: any</option><option value="captured"' + (q.gps === 'captured' ? ' selected' : '') + '>GPS captured</option><option value="missing"' + (q.gps === 'missing' ? ' selected' : '') + '>GPS missing</option></select>' +
         '<select id="cAct"><option value="">Active + inactive</option><option value="true"' + (q.active === 'true' ? ' selected' : '') + '>Active</option><option value="false"' + (q.active === 'false' ? ' selected' : '') + '>Inactive</option></select>' +
@@ -1079,6 +1084,7 @@
       var t; $('#cq').oninput = function (ev) { clearTimeout(t); var sq = renderSeq; t = setTimeout(function () { if (sq !== renderSeq) return; setQ({ q: ev.target.value }); }, 450); };
       $('#cArea').onchange = function (ev) { setQ({ area: ev.target.value }); };
       if ($('#cSp')) $('#cSp').onchange = function (ev) { setQ({ sp: ev.target.value }); };
+      if ($('#cMine')) $('#cMine').onchange = function (ev) { setQ({ mine: ev.target.value }); };
       $('#cGps').onchange = function (ev) { setQ({ gps: ev.target.value }); };
       $('#cAct').onchange = function (ev) { setQ({ active: ev.target.value }); };
       var s = $('#cq'); if (q.q) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
@@ -1105,7 +1111,7 @@
     var html = '<div class="card"><div style="display:flex;justify-content:space-between;gap:8px;align-items:start"><div><h2 style="margin:0">' + esc(c.ShopName) + '</h2><div style="color:var(--muted)">' + esc(c.Code) + '</div></div>' + badge(c.Active) + '</div>' +
       '<dl class="kv" style="margin-top:12px"><dt>Contact</dt><dd>' + esc(c.ContactPerson) + '</dd><dt>Mobile</dt><dd>' + (c.Mobile ? '<a href="tel:' + esc(c.Mobile) + '">' + esc(c.Mobile) + '</a>' : '') + '</dd>' +
       '<dt>WhatsApp</dt><dd>' + (c.WhatsApp ? '<a href="https://wa.me/' + esc(c.WhatsApp.replace(/^0/, '92').replace(/^\+/, '')) + '" target="_blank" rel="noopener">' + esc(c.WhatsApp) + '</a>' : '') + '</dd>' +
-      '<dt>Address</dt><dd>' + esc(c.Address) + '</dd><dt>Area / City</dt><dd>' + esc(c.Area) + ', ' + esc(c.City) + '</dd><dt>Salesperson</dt><dd>' + esc(c.SalespersonName) + '</dd>' +
+      '<dt>Address</dt><dd>' + esc(c.Address) + '</dd><dt>Area / City</dt><dd>' + esc(c.Area) + ', ' + esc(c.City) + '</dd><dt>Salesperson</dt><dd>' + esc(c.SalespersonName) + (c.Mine === false && State.me && State.me.salespersonId ? ' <span class="badge">another salesperson\'s shop</span>' : '') + '</dd>' +
       '<dt>Type</dt><dd>' + esc(c.CustomerType) + '</dd><dt>Credit limit</dt><dd>' + money(c.CreditLimit) + '</dd><dt>Payment terms</dt><dd>' + esc(c.PaymentTerms) + '</dd>' +
       '<dt>Outstanding</dt><dd>' + (c.QBBalanceAsOf ? money(c.QBBalance) + ' <span class="badge">as of ' + fmtDate(c.QBBalanceAsOf) + '</span>' : '<span class="badge">Not synced from QuickBooks yet</span>') + '</dd>' +
       '<dt>QuickBooks</dt><dd>' + qbCustomerState(c) + '</dd>' +
@@ -1115,7 +1121,8 @@
       (c.CanCreateInQB ? '<button class="btn" id="qbCreate">Create in QuickBooks</button>' : '') +
       (can(['orders.view.all', 'orders.view.own']) && !c.LocalPending ? '<a class="btn" href="#/reports/statement?customerId=' + encodeURIComponent(c.CustomerID) + '&customerName=' + encodeURIComponent(c.ShopName) + '">Statement</a>' : '') + '</div>' +
       ((can('visits.create') || can('orders.create')) && c.Active ? '<div class="btn-row">' + (can('visits.create') ? '<button class="btn" id="visitBtn">📍 Record visit</button>' : '') +
-        (can('orders.create') ? '<a class="btn primary" href="#/orders/new?customer=' + encodeURIComponent(c.CustomerID) + '">+ New order</a>' : '') + '</div>' : '') + '</div>';
+        (can('orders.create') ? '<a class="btn primary" href="#/orders/new?customer=' + encodeURIComponent(c.CustomerID) + '">+ New order</a>' : '') + '</div>' +
+        (c.Mine === false && State.me && State.me.salespersonId ? '<p class="hint" style="font-size:12px;color:var(--muted);margin:6px 0 0">Orders and visits you record here are yours (your commission). You do not see the other salesperson\'s orders.</p>' : '') : '') + '</div>';
 
     html += '<div class="card"><h2>Location</h2><div class="gps-box' + (hasGps ? ' ok' : '') + '" id="gpsBox">' +
       (hasGps ? '<dl class="kv"><dt>Latitude</dt><dd>' + c.Latitude.toFixed(6) + '</dd><dt>Longitude</dt><dd>' + c.Longitude.toFixed(6) + '</dd><dt>Accuracy</dt><dd>' + Math.round(c.GPSAccuracy) + ' m</dd><dt>Captured</dt><dd>' + fmtDate(c.LocationCapturedAt) + '</dd><dt>Captured by</dt><dd>' + esc(c.LocationCapturedByName) + '</dd></dl>' +
@@ -1316,7 +1323,8 @@
       var list = res[0], terr = res[1], logins = res[2];
       var html = '<div class="toolbar"><input type="search" class="search" id="sq" placeholder="Search" value="' + esc(r.q.q || '') + '">' + (can('salespersons.manage') ? '<button class="btn primary" id="sNew">+ New salesperson</button>' : '') + '</div>';
       html += list.items.length ? '<ul class="list">' + list.items.map(function (s, i) {
-        return '<li><a class="row" role="button" tabindex="0" style="cursor:pointer" data-i="' + i + '"><span class="main-t"><div class="t1">' + esc(s.Name) + '</div><div class="t2">' + esc(s.Code) + ' · ' + esc(s.Mobile) + ' · ' + s.ActiveCustomers + ' customers' + (s.UserID ? '' : ' · no login linked') + '</div></span>' + badge(s.Active) + '</a></li>';
+        return '<li><a class="row" role="button" tabindex="0" style="cursor:pointer" data-i="' + i + '"><span class="main-t"><div class="t1">' + esc(s.Name) + '</div><div class="t2">' + esc(s.Code) + ' · ' + esc(s.Mobile) + ' · ' + s.ActiveCustomers + ' customers' + (s.UserID ? '' : ' · no login linked') +
+          (can('qb.manage') ? ' · ' + repText(s) : '') + '</div></span>' + badge(s.Active) + '</a></li>';
       }).join('') + '</ul>' : '<div class="empty card">No salespersons yet.</div>';
       var pg = pager(list, function (p) { go('salespersons?page=' + p + (r.q.q ? '&q=' + encodeURIComponent(r.q.q) : '')); });
       var root = shell('Salespersons', html + pg.html); pg.bind(root);
@@ -1330,8 +1338,18 @@
           { name: 'Area', label: 'Area' }, { name: 'JoiningDate', label: 'Joining date', type: 'date' },
           { name: 'CommissionEligible', label: 'Eligible for commission', type: 'checkbox', dflt: true }, { name: 'Active', label: 'Active', type: 'checkbox', dflt: true }
         ].map(function (f) { if (!can('salespersons.manage')) f.readonly = true; return f; });
-        modal(s ? s.Name : 'New salesperson', '<form id="sf">' + formHtml(fields, s) + '<div class="btn-row">' + (can('salespersons.manage') ? '<button class="btn primary" type="submit">Save</button>' : '') + '<button class="btn" type="button" id="sc">Close</button></div></form>', function (m, close) {
+        var qbBox = s && can('qb.manage') ? '<div class="card" style="margin:0 0 12px;padding:12px"><b>QuickBooks Sales Rep</b><div style="margin:6px 0">' + repText(s) +
+          (s.QBRepCreateStatus === 'EXCEPTION' && s.QBRepCreateError ? '<div class="alert bad" style="margin:6px 0 0">' + esc(s.QBRepCreateError) + '</div>' : '') + '</div>' +
+          '<p class="hint" style="font-size:12px;color:var(--muted);margin:0 0 8px">Orders this salesperson books go to QuickBooks with this Sales Rep.</p>' +
+          '<div class="btn-row" style="margin:0"><button class="btn" type="button" id="spRep">Choose Sales Rep</button>' +
+          (!s.QBSalesRepListID && ['PENDING', 'IN_PROGRESS', 'FAILED'].indexOf(s.QBRepCreateStatus) < 0 ? '<button class="btn" type="button" id="spRepNew">Create in QuickBooks</button>' : '') + '</div></div>' : '';
+        modal(s ? s.Name : 'New salesperson', qbBox + '<form id="sf">' + formHtml(fields, s) + '<div class="btn-row">' + (can('salespersons.manage') ? '<button class="btn primary" type="submit">Save</button>' : '') + '<button class="btn" type="button" id="sc">Close</button></div></form>', function (m, close) {
           $('#sc', m).onclick = close;
+          if ($('#spRep', m)) $('#spRep', m).onclick = function () { close(); qbRepModal(s); };
+          if ($('#spRepNew', m)) $('#spRepNew', m).onclick = function () {
+            var b = this; busy(b, true);
+            API.call('salespersons.createRepInQb', { SalespersonID: s.SalespersonID }).then(function () { close(); toast('The bridge will create the Sales Rep in QuickBooks on its next run.'); render(); }).catch(function (e) { busy(b, false); showError(e); });
+          };
           var f = $('#sf', m);
           f.onsubmit = function (ev) {
             ev.preventDefault(); var b = $('button[type=submit]', f); busy(b, true);
@@ -1344,6 +1362,42 @@
       $all('[data-i]', root).forEach(function (a) { a.onclick = function () { open(list.items[Number(a.dataset.i)]); }; });
     }).catch(showError);
   };
+
+  function repText(s) {
+    if (s.QBSalesRepListID) return '<span class="badge good">QuickBooks rep ' + esc(s.QBSalesRepInitial) + '</span>';
+    if (['PENDING', 'IN_PROGRESS', 'FAILED'].indexOf(s.QBRepCreateStatus) >= 0) return '<span class="badge warn">Sales Rep being created in QuickBooks</span>';
+    if (s.QBRepCreateStatus === 'EXCEPTION') return '<span class="badge bad">Sales Rep could not be created</span>';
+    return '<span class="badge">No QuickBooks Sales Rep yet</span>';
+  }
+
+  /** Links a salesperson to a Sales Rep from the QuickBooks list imported by the bridge. */
+  function qbRepModal(s) {
+    modal('QuickBooks Sales Rep — ' + s.Name, '<p class="hint" style="font-size:13px;color:var(--muted)">Pick this salesperson\'s Sales Rep from the QuickBooks list (imported by the bridge every hour). Orders the salesperson books are sent with this Sales Rep.</p>' +
+      '<input type="search" id="qbq" placeholder="Search initials or name" value="" autocomplete="off"><ul class="list" id="qbres" style="margin:8px 0 14px;max-height:260px;overflow:auto"></ul>' +
+      '<div class="field"><label>Chosen Sales Rep</label><input type="text" id="qbn" value="' + esc(s.QBSalesRepInitial || '') + '" readonly placeholder="pick one from the list above" style="background:var(--bg)"><input type="hidden" id="qbl" value="' + esc(s.QBSalesRepListID || '') + '"><div class="ferr" data-err="QBSalesRepListID"></div></div>' +
+      '<div class="btn-row"><button class="btn primary" id="qbs">Save</button>' + (s.QBSalesRepListID ? '<button class="btn danger" id="qbx">Remove link</button>' : '') + '<button class="btn" id="qbc">Cancel</button></div>', function (m, close) {
+        $('#qbc', m).onclick = close;
+        var t, search = function () {
+          API.call('qb.lists', { kind: 'SALESREP', q: $('#qbq', m).value.trim(), pageSize: 30 }).then(function (res) {
+            $('#qbres', m).innerHTML = res.items.length ? res.items.map(function (x, i) {
+              return '<li><a class="row" role="button" tabindex="0" style="cursor:pointer" data-x="' + i + '"><span class="main-t"><div class="t1">' + esc(x.FullName) + '</div><div class="t2">' + esc(x.ListID) + '</div></span>' +
+                (x.MappedTo ? '<span class="badge warn" title="Already linked">' + esc(x.MappedTo) + '</span>' : '') + '</a></li>';
+            }).join('') : '<li><div class="row">' + (!$('#qbq', m).value ? 'No Sales Rep list imported yet. Start the bridge (it imports the lists when it starts), or press Create in QuickBooks on the salesperson.' : 'No match. Try a shorter search.') + '</div></li>';
+            $all('[data-x]', m).forEach(function (a) { a.onclick = function () { var x = res.items[Number(a.dataset.x)]; $('#qbl', m).value = x.ListID; $('#qbn', m).value = x.FullName; }; });
+          }).catch(function (e) { $('#qbres', m).innerHTML = '<li><div class="row">' + esc(e.message) + '</div></li>'; });
+        };
+        $('#qbq', m).oninput = function () { clearTimeout(t); t = setTimeout(search, 300); };
+        search();
+        var save = function (listId, b) {
+          busy(b, true);
+          API.call('salespersons.setQbRep', { SalespersonID: s.SalespersonID, QBSalesRepListID: listId, Version: s.Version }).then(function () {
+            close(); toast(listId ? 'Sales Rep linked. Orders waiting for it were sent to QuickBooks again.' : 'Sales Rep link removed.'); render();
+          }).catch(function (e) { busy(b, false); fieldError(m, e); });
+        };
+        $('#qbs', m).onclick = function () { save($('#qbl', m).value.trim(), this); };
+        if ($('#qbx', m)) $('#qbx', m).onclick = function () { save('', this); };
+      });
+  }
 
   // ---------- views: users ----------
   VIEWS.users = function (r) {
@@ -1459,6 +1513,10 @@
   VIEWS.backups = function () {
     loading('Backups');
     API.call('backup.list', {}).then(function (list) {
+      if (list.supabase) {   // Supabase version: the database backups are made by Supabase
+        shell('Backups', '<div class="card"><h2>Backups</h2><p>' + esc(list.note) + '</p></div>');
+        return;
+      }
       var html = '<div class="card"><p>A copy of the database is saved to a private Google Drive folder every night at 02:00 (Pakistan time). You can also take one now.</p><button class="btn primary" id="bNow">Back up now</button></div>' +
         '<div class="card scroll-x"><table class="tbl"><tr><th>When</th><th>File</th><th>Status</th></tr>' + list.items.map(function (b) {
           return '<tr><td>' + fmtDate(b.At) + '</td><td>' + esc(b.FileName) + '</td><td>' + (b.Status === 'OK' ? '<span class="badge good">OK</span>' : '<span class="badge bad">' + esc(b.Status) + '</span> ' + esc(b.Message)) + '</td></tr>';
@@ -1560,16 +1618,17 @@
     if (r.seg[1]) return orderDetail(r.seg[1]);
     var q = r.q;
     loading('Orders');
-    API.call('orders.list', { q: q.q, status: q.status, from: q.from, to: q.to, credit: q.credit, page: Number(q.page) || 1 }).then(function (list) {
+    API.call('orders.list', { q: q.q, status: q.status, from: q.from, to: q.to, credit: q.credit, price: q.price, page: Number(q.page) || 1 }).then(function (list) {
       var html = '<div class="toolbar"><input type="search" class="search" id="oq" placeholder="Order no. or customer" value="' + esc(q.q || '') + '">' +
         '<select id="oSt"><option value="">All statuses</option>' + Object.keys(ORDER_LABELS).map(function (k) { return '<option value="' + k + '"' + (q.status === k ? ' selected' : '') + '>' + ORDER_LABELS[k] + '</option>'; }).join('') + '</select>' +
         '<input type="date" id="oFrom" value="' + esc(q.from || '') + '" title="From"><input type="date" id="oTo" value="' + esc(q.to || '') + '" title="To">' +
         (can('orders.create') ? '<a class="btn primary" href="#/orders/new">+ New order</a>' : '') + '</div>';
       if (q.credit === 'exception') html += '<div class="alert warn">Showing submitted orders with credit exceptions. <a href="#/orders">Clear</a></div>';
+      if (q.price === 'below') html += '<div class="alert warn">Showing submitted orders with prices below the catalogue (need approval). <a href="#/orders">Clear</a></div>';
       html += '<p style="margin:0 0 8px;color:var(--muted);font-size:14px">' + list.total + ' orders · total ' + money(list.totalValue) + '</p>';
       html += list.items.length ? '<ul class="list">' + list.items.map(function (o) {
         return '<li><a class="row" href="#/orders/' + encodeURIComponent(o.OrderID) + '"><span class="main-t"><div class="t1">' + esc(o.CustomerName) + '</div><div class="t2">' + esc(o.OrderNo) + ' · ' + fmtDate(o.OrderDate, false) + (can('orders.view.all') ? ' · ' + esc(o.SalespersonName) : '') + '</div></span>' +
-          '<span style="text-align:right"><div style="font-weight:700;white-space:nowrap">' + (o.Local ? '≈ ' : '') + money(o.NetAmount) + '</div>' + (o.Failed ? '<span class="badge bad">Not accepted</span>' : statusBadge(o.Status)) + (o.Archived ? ' <span class="badge">Archived</span>' : '') + ' ' + creditBadge(o.Status === 'SUBMITTED' ? o.CreditStatus : '') + '</span></a></li>';
+          '<span style="text-align:right"><div style="font-weight:700;white-space:nowrap">' + (o.Local ? '≈ ' : '') + money(o.NetAmount) + '</div>' + (o.Failed ? '<span class="badge bad">Not accepted</span>' : statusBadge(o.Status)) + (o.Archived ? ' <span class="badge">Archived</span>' : '') + ' ' + creditBadge(o.Status === 'SUBMITTED' ? o.CreditStatus : '') + (o.Status === 'SUBMITTED' && o.PriceStatus === 'BELOW_LIST' ? ' <span class="badge warn">Price below list</span>' : '') + '</span></a></li>';
       }).join('') + '</ul>' : '<div class="empty card">No orders found.</div>';
       var pg = pager(list, function (p) { setQ({ page: p }); });
       var root = shell('Orders', html + pg.html); pg.bind(root);
@@ -1587,32 +1646,44 @@
     if (l.DiscountMode === 'AMT') return Math.min(Math.round((Number(l.DiscountAmount) || 0) * 100) / 100, gross);
     return gross * (Number(l.DiscountPct) || 0) / 100;
   }
-  /** Mirrors the server formula for an on-screen estimate. The server recalculates and its figures are final. */
+  /** Mirrors the server formula for an on-screen estimate (price per carton; catalogue price when none typed). The server's figures are final. */
   function previewLine(l) {
     var p = l.product, upc = Number(p.UnitsPerCarton), qty = (Number(l.Cartons) || 0) * upc + (Number(l.LooseUnits) || 0);
     var r2 = function (n) { return Math.round((n + Number.EPSILON) * 100) / 100; };
-    var gross = r2(qty * Number(p.WholesalePrice)), disc = lineDiscount(l, gross), tax = (gross - r2(disc)) * (Number(p.TaxRate) || 0) / 100;
-    return { qty: qty, cartons: qty / upc, gross: gross, disc: r2(disc), tax: r2(tax), net: r2(gross - r2(disc) + r2(tax)) };
+    var listRate = Number(p.WholesalePrice) || 0, listCtn = r2(listRate * upc);
+    var cp = l.CartonPrice === undefined || l.CartonPrice === null || l.CartonPrice === '' ? listCtn : r2(Number(l.CartonPrice) || 0);
+    var gross = r2(cp === listCtn ? qty * listRate : qty * cp / upc), disc = lineDiscount(l, gross), tax = (gross - r2(disc)) * (Number(p.TaxRate) || 0) / 100;
+    var maxDrop = Number(State.settings.MAX_PRICE_DROP_PCT) || 0, drop = listCtn > 0 ? (listCtn - cp) / listCtn * 100 : 0;
+    return { qty: qty, cartons: qty / upc, gross: gross, disc: r2(disc), tax: r2(tax), net: r2(gross - r2(disc) + r2(tax)),
+      cartonPrice: cp, listCtn: listCtn, belowList: drop > maxDrop + 1e-9 };
   }
 
   function orderForm(o, q) {
     var st = {
       clientUUID: uuid(), customer: null, visitId: o ? o.VisitID : (q.visit || ''), remarks: o ? o.Remarks : '',
-      lines: o ? o.Lines.map(function (l) {
-        var upc = l.UnitsPerCarton, full = Math.floor(l.Quantity / upc + 1e-9);
-        return { product: { ProductID: l.ProductID, Name: l.ProductName, SKU: l.SKU, Unit: l.Unit, UnitsPerCarton: upc, WholesalePrice: l.Rate, TaxRate: l.TaxRate },
-          Cartons: full, LooseUnits: Math.round((l.Quantity - full * upc) * 1000) / 1000,
-          DiscountMode: l.DiscountMode === 'PCT' ? 'PCT' : 'AMT', DiscountPct: l.DiscountPct, DiscountAmount: l.DiscountMode === 'PCT' ? '' : (l.DiscountAmount || 0) };
-      }) : [],
-      gps: null, credit: null
+      // the catalogue: one entry per product the salesperson has filled in, keyed by ProductID (only rows with a quantity become lines)
+      items: {}, catalogue: null, categories: [], filter: '',
+      gps: null, credit: null,
+      // the salesperson who took the order owns it (commission, QuickBooks Sales Rep). A salesperson's login books for themself;
+      // an office user chooses, starting from the shop's own salesperson.
+      office: !(State.me && State.me.salespersonId), spId: o ? o.SalespersonID : '', spOptions: null
     };
+    if (o) o.Lines.forEach(function (l) {
+      var upc = l.UnitsPerCarton, full = Math.floor(l.Quantity / upc + 1e-9);
+      st.items[l.ProductID] = { product: { ProductID: l.ProductID, Name: l.ProductName, SKU: l.SKU, Unit: l.Unit, UnitsPerCarton: upc, WholesalePrice: l.ListRate !== '' && l.ListRate !== undefined ? l.ListRate : l.Rate, TaxRate: l.TaxRate },
+        Cartons: full, LooseUnits: Math.round((l.Quantity - full * upc) * 1000) / 1000, CartonPrice: l.CartonPrice !== '' && l.CartonPrice !== undefined ? l.CartonPrice : Math.round(l.Rate * upc * 100) / 100,
+        DiscountMode: l.DiscountMode === 'PCT' ? 'PCT' : 'AMT', DiscountPct: l.DiscountPct, DiscountAmount: l.DiscountMode === 'PCT' ? '' : (l.DiscountAmount || 0), more: !!(Number(l.DiscountAmount) || l.Quantity % upc) };
+    });
+    function lines() { return Object.keys(st.items).map(function (k) { return st.items[k]; }).filter(function (it) { return previewLine(it).qty > 0; }); }
     var title = o ? 'Edit ' + o.OrderNo : 'New order';
+    if (st.office) (custOpts.sp ? Promise.resolve(custOpts.sp) : API.call('salespersons.options')).then(function (s) { custOpts.sp = s; st.spOptions = s; if (st.customer) draw(); }).catch(function () { st.spOptions = []; });
     var root = shell(title, '<div id="ofBody"><div class="spinner">Loading…</div></div>', { back: o ? 'orders/' + encodeURIComponent(o.OrderID) : 'orders' });
     // attach device GPS to the order when available (never blocks the order)
     if (!o) getPosition().then(function (pos) { st.gps = pos; }).catch(function () { st.gps = null; });
 
     var custId = o ? o.CustomerID : q.customer;
-    (custId ? API.call('customers.get', { CustomerID: custId }) : Promise.resolve(null)).then(function (c) { st.customer = c; draw(); }).catch(function (e) { showError(e); draw(); });
+    (custId ? API.call('customers.get', { CustomerID: custId }) : Promise.resolve(null)).then(function (c) { setCustomer(c); draw(); }).catch(function (e) { showError(e); draw(); });
+    function setCustomer(c) { st.customer = c; if (c && st.office && !o) st.spId = c.SalespersonID || ''; }
 
     function draw() {
       var body = $('#ofBody', root); if (!body) return;
@@ -1623,16 +1694,22 @@
         var c = st.customer;
         html += '<div class="card"><div style="display:flex;justify-content:space-between;gap:8px"><div><b>' + esc(c.ShopName) + '</b><div style="color:var(--muted);font-size:14px">' + esc(c.Code) + ' · ' + esc(c.Address) + ', ' + esc(c.Area) + '</div>' +
           '<div style="font-size:13px;margin-top:4px">' + (typeof c.Latitude === 'number' ? '<span class="badge good">Shop GPS saved</span>' : '<span class="badge warn">Shop GPS missing</span>') + (st.visitId ? ' <span class="badge good">Linked to visit</span>' : '') + '</div></div>' +
-          (o ? '' : '<button class="btn" id="chgCust">Change</button>') + '</div></div>';
-        html += '<div class="card"><h2>2. Products</h2><input type="search" id="prodSearch" placeholder="Search product name or SKU to add" autocomplete="off"><ul class="list" id="prodResults" style="margin-top:8px"></ul><div id="linesBox" style="margin-top:12px"></div></div>';
+          (o ? '' : '<button class="btn" id="chgCust">Change</button>') + '</div>' +
+          (st.office ? '<div class="field" style="margin:12px 0 0"><label for="oSp">Salesperson who took this order *</label><select id="oSp"><option value="">— choose —</option>' +
+            (st.spOptions || (st.spId ? [{ id: st.spId, label: (o && o.SalespersonName) || c.SalespersonName || st.spId }] : [])).map(function (x) { return '<option value="' + esc(x.id) + '"' + (x.id === st.spId ? ' selected' : '') + '>' + esc(x.label) + '</option>'; }).join('') +
+            '</select><small style="color:var(--muted)">' + (c.SalespersonName ? 'Shop\'s salesperson: ' + esc(c.SalespersonName) + '. ' : 'This shop has no salesperson. ') + 'Commission and the QuickBooks Sales Rep go to the salesperson chosen here.</small></div>' : '') + '</div>';
+        html += '<div class="card"><h2>2. Products</h2><p class="hint" style="font-size:13px;color:var(--muted);margin:0 0 8px">Enter <b>cartons</b> for each product you sell. The price per carton is the catalogue price; change it if you agreed another price (a lower price needs the manager\'s approval).</p>' +
+          '<input type="search" id="catSearch" placeholder="Search product name or SKU" autocomplete="off" value="' + esc(st.filter) + '"><div id="catBox" style="margin-top:10px"><div class="spinner">Loading products…</div></div>' +
+          '<div class="cat-bar" id="catBar"></div></div>';
         html += '<div class="card"><h2>3. Review</h2><div id="totBox"></div><div class="field" style="margin-top:12px"><label>Remarks</label><textarea id="oRem" placeholder="Delivery instructions, notes">' + esc(st.remarks) + '</textarea></div><div id="credBox"></div>' +
           '<div class="btn-row"><button class="btn" id="saveDraft">Save draft</button><button class="btn primary" id="submitOrder">Submit order</button></div>' +
-          '<p class="hint" style="font-size:12px;color:var(--muted)">Prices come from the product list. Amounts shown are calculated again by the server when you save.</p></div>';
+          '<p class="hint" style="font-size:12px;color:var(--muted)">Amounts shown are calculated again by the server when you save.</p></div>';
       }
       body.innerHTML = html;
       if (!st.customer) return bindCustomerSearch();
       if ($('#chgCust', body)) $('#chgCust', body).onclick = function () { st.customer = null; st.credit = null; draw(); };
-      bindProductSearch(); drawLines();
+      if ($('#oSp', body)) $('#oSp', body).onchange = function (ev) { st.spId = ev.target.value; };
+      drawCatalogue();
       $('#oRem', body).oninput = function (ev) { st.remarks = ev.target.value; };
       $('#saveDraft', body).onclick = function () { send(false, this); };
       $('#submitOrder', body).onclick = function () { send(true, this); };
@@ -1644,7 +1721,7 @@
         API.call('customers.list', { q: inp.value, active: 'true', pageSize: 15 }).then(function (res) {
           $('#custResults', root).innerHTML = res.items.map(function (c, i) { return '<li><a class="row" role="button" tabindex="0" style="cursor:pointer" data-c="' + i + '"><span class="main-t"><div class="t1">' + esc(c.ShopName) + '</div><div class="t2">' + esc(c.Code) + ' · ' + esc(c.Area) + ' · ' + esc(c.Mobile) + '</div></span></a></li>'; }).join('') || '<li><div class="row">No matching customers</div></li>';
           $all('[data-c]', root).forEach(function (a) { a.onclick = function () {
-            API.call('customers.get', { CustomerID: res.items[Number(a.dataset.c)].CustomerID }).then(function (c) { st.customer = c; draw(); }).catch(showError);
+            API.call('customers.get', { CustomerID: res.items[Number(a.dataset.c)].CustomerID }).then(function (c) { setCustomer(c); draw(); }).catch(showError);
           }; });
         }).catch(showError);
       };
@@ -1652,57 +1729,94 @@
       inp.focus(); run();
     }
 
-    function bindProductSearch() {
-      var inp = $('#prodSearch', root), t;
-      inp.oninput = function () {
-        clearTimeout(t);
-        if (!inp.value.trim()) { $('#prodResults', root).innerHTML = ''; return; }
-        t = setTimeout(function () {
-          API.call('products.list', { q: inp.value, active: 'true', pageSize: 10 }).then(function (res) {
-            $('#prodResults', root).innerHTML = res.items.map(function (p, i) { return '<li><a class="row" role="button" tabindex="0" style="cursor:pointer" data-p="' + i + '"><span class="main-t"><div class="t1">' + esc(p.Name) + '</div><div class="t2">' + esc(p.SKU) + ' · ' + money(p.WholesalePrice) + ' / ' + esc(p.Unit) + ' · ' + p.UnitsPerCarton + ' per carton</div></span><span class="badge good">+ Add</span></a></li>'; }).join('') || '<li><div class="row">No matching products</div></li>';
-            $all('[data-p]', $('#prodResults', root)).forEach(function (a) { a.onclick = function () {
-              var p = res.items[Number(a.dataset.p)];
-              if (st.lines.some(function (l) { return l.product.ProductID === p.ProductID; })) { toast(p.Name + ' is already in the order.'); return; }
-              st.lines.push({ product: p, Cartons: 1, LooseUnits: 0, DiscountMode: 'AMT', DiscountAmount: 0, DiscountPct: 0 });
-              inp.value = ''; $('#prodResults', root).innerHTML = ''; drawLines();
-            }; });
-          }).catch(showError);
-        }, 300);
+    /** The whole active catalogue (from the phone's offline copy when there is no signal), grouped by category. */
+    function loadCatalogue() {
+      if (st.catalogue) return Promise.resolve(st.catalogue);
+      var all = [], page = function (n) {
+        return API.call('products.list', { active: 'true', pageSize: 200, page: n }).then(function (r) { all = all.concat(r.items); return n < (r.pages || 1) ? page(n + 1) : all; });
       };
+      return Promise.all([page(1), API.call('categories.list').catch(function () { return []; })]).then(function (res) {
+        st.categories = res[1] || []; st.catalogue = res[0];
+        // products already on a draft that are no longer in the catalogue still show (the server tells if they cannot be ordered)
+        Object.keys(st.items).forEach(function (id) { if (!st.catalogue.some(function (p) { return p.ProductID === id; })) st.catalogue.push(st.items[id].product); });
+        return st.catalogue;
+      });
     }
 
-    function drawLines() {
-      var box = $('#linesBox', root); if (!box) return;
-      box.innerHTML = st.lines.length ? st.lines.map(function (l, i) {
-        var pv = previewLine(l);
-        return '<div class="card" style="padding:12px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;gap:8px"><div><b>' + esc(l.product.Name) + '</b><div style="font-size:13px;color:var(--muted)">' + esc(l.product.SKU) + ' · ' + money(l.product.WholesalePrice) + ' / ' + esc(l.product.Unit) + ' · ' + l.product.UnitsPerCarton + ' per carton</div></div>' +
-          '<button class="btn danger" data-rm="' + i + '" aria-label="Remove" style="min-height:36px;padding:0 10px">✕</button></div>' +
-          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">' +
-          '<label style="font-size:13px">Cartons<input type="number" inputmode="numeric" min="0" step="1" data-f="Cartons" data-i="' + i + '" value="' + esc(l.Cartons) + '"></label>' +
-          '<label style="font-size:13px">Loose ' + esc(l.product.Unit) + '<input type="number" inputmode="decimal" min="0" step="any" data-f="LooseUnits" data-i="' + i + '" value="' + esc(l.LooseUnits) + '"></label>' +
-          '<label style="font-size:13px;grid-column:span 2">Discount (' + (l.DiscountMode === 'PCT' ? '% of the line' : 'PKR for the whole line') + ')<span style="display:flex;gap:6px">' +
-            (l.DiscountMode === 'PCT'
-              ? '<input type="number" inputmode="decimal" min="0" max="100" step="any" data-f="DiscountPct" data-i="' + i + '" value="' + esc(l.DiscountPct) + '" style="min-width:0;flex:1">'
-              : '<input type="number" inputmode="decimal" min="0" step="any" data-f="DiscountAmount" data-i="' + i + '" value="' + esc(l.DiscountAmount) + '" style="min-width:0;flex:1">') +
-            '<select data-dm="' + i + '" aria-label="Discount in" style="width:90px;flex:none"><option value="AMT"' + (l.DiscountMode !== 'PCT' ? ' selected' : '') + '>PKR</option><option value="PCT"' + (l.DiscountMode === 'PCT' ? ' selected' : '') + '>%</option></select></span></label></div>' +
-          '<div style="font-size:13px;margin-top:6px;color:var(--muted)" data-pv="' + i + '">' + pvText(pv) + '</div></div>';
-      }).join('') : '<div class="empty">No products added yet. Search above to add.</div>';
-      $all('[data-rm]', box).forEach(function (b) { b.onclick = function () { st.lines.splice(Number(b.dataset.rm), 1); drawLines(); }; });
-      $all('[data-dm]', box).forEach(function (sel) { sel.onchange = function () {
-        var l = st.lines[Number(sel.dataset.dm)]; l.DiscountMode = sel.value; l.DiscountPct = 0; l.DiscountAmount = 0; drawLines(); drawTotals();
-      }; });
-      $all('[data-f]', box).forEach(function (inp) { inp.oninput = function () {
-        var l = st.lines[Number(inp.dataset.i)]; l[inp.dataset.f] = inp.value;
-        $('[data-pv="' + inp.dataset.i + '"]', box).innerHTML = pvText(previewLine(l)); drawTotals();
-      }; });
-      drawTotals();
+    function drawCatalogue() {
+      var box = $('#catBox', root); if (!box) return;
+      loadCatalogue().then(function (prods) {
+        box = $('#catBox', root); if (!box) return;
+        var catName = {}; st.categories.forEach(function (c) { catName[c.CategoryID] = c.Name; });
+        var groups = {};
+        prods.forEach(function (p) { var g = catName[p.CategoryID] || p.CategoryName || 'Other products'; (groups[g] = groups[g] || []).push(p); });
+        var names = Object.keys(groups).sort(function (a, b) { return a === 'Other products' ? 1 : b === 'Other products' ? -1 : a.localeCompare(b); });
+        box.innerHTML = prods.length ? names.map(function (g) {
+          return '<div class="cat-group" data-group><div class="group-title" style="margin:12px 0 6px">' + esc(g) + '</div>' + groups[g].sort(function (a, b) { return a.Name.localeCompare(b.Name); }).map(rowHtml).join('') + '</div>';
+        }).join('') : '<div class="empty">No active products. Ask the office to add products.</div>';
+        bindCatalogue(); applyFilter(); drawTotals();
+      }).catch(function (e) { box.innerHTML = '<div class="alert bad">' + esc(e.message || 'Products could not be loaded.') + '</div>'; });
     }
-    function pvText(pv) { return '= ' + (Math.round(pv.qty * 1000) / 1000) + ' units (' + (Math.round(pv.cartons * 100) / 100) + ' ctn) · Net <b>' + money(pv.net) + '</b>'; }
+
+    function itemFor(p) {
+      return st.items[p.ProductID] || (st.items[p.ProductID] = { product: p, Cartons: '', LooseUnits: '', CartonPrice: Math.round(Number(p.WholesalePrice) * Number(p.UnitsPerCarton) * 100) / 100,
+        DiscountMode: 'AMT', DiscountAmount: '', DiscountPct: '', more: false });
+    }
+
+    function rowHtml(p) {
+      var it = st.items[p.ProductID] || { Cartons: '', LooseUnits: '', CartonPrice: Math.round(Number(p.WholesalePrice) * Number(p.UnitsPerCarton) * 100) / 100, DiscountMode: 'AMT', DiscountAmount: '', DiscountPct: '', more: false };
+      var id = esc(p.ProductID), listCtn = Math.round(Number(p.WholesalePrice) * Number(p.UnitsPerCarton) * 100) / 100;
+      return '<div class="cat-row" data-pid="' + id + '" data-sku="' + esc(p.SKU) + '" data-key="' + esc((p.Name + ' ' + p.SKU).toLowerCase()) + '">' +
+        '<div class="cat-name"><b>' + esc(p.Name) + '</b><small>' + esc(p.SKU) + ' · ' + esc(p.UnitsPerCarton) + ' ' + esc(p.Unit) + ' per carton · list ' + money(listCtn) + '/ctn</small></div>' +
+        '<div class="cat-in"><label>Cartons<input type="number" inputmode="numeric" min="0" step="1" data-f="Cartons" value="' + esc(it.Cartons) + '" placeholder="0"></label>' +
+        '<label>Price per carton<input type="number" inputmode="decimal" min="0" step="any" data-f="CartonPrice" value="' + esc(it.CartonPrice) + '"></label></div>' +
+        '<button type="button" class="cat-more-btn" data-more>' + (it.more ? 'Hide loose units &amp; discount' : 'Loose units &amp; discount') + '</button>' +
+        '<div class="cat-more"' + (it.more ? '' : ' hidden') + '><label>Loose ' + esc(p.Unit) + '<input type="number" inputmode="decimal" min="0" step="any" data-f="LooseUnits" value="' + esc(it.LooseUnits) + '" placeholder="0"></label>' +
+          '<label>Discount<span style="display:flex;gap:6px"><input type="number" inputmode="decimal" min="0" step="any" data-f="' + (it.DiscountMode === 'PCT' ? 'DiscountPct' : 'DiscountAmount') + '" value="' + esc(it.DiscountMode === 'PCT' ? it.DiscountPct : it.DiscountAmount) + '" placeholder="0" style="min-width:0;flex:1">' +
+          '<select data-dm aria-label="Discount in" style="width:78px;flex:none"><option value="AMT"' + (it.DiscountMode !== 'PCT' ? ' selected' : '') + '>PKR</option><option value="PCT"' + (it.DiscountMode === 'PCT' ? ' selected' : '') + '>%</option></select></span></label></div>' +
+        '<div class="cat-pv" data-pv></div></div>';
+    }
+
+    function pvRow(row) {
+      var it = st.items[row.dataset.pid], el = $('[data-pv]', row);
+      if (!it) { el.innerHTML = ''; row.classList.remove('on', 'below'); return; }
+      var pv = previewLine(it);
+      row.classList.toggle('on', pv.qty > 0); row.classList.toggle('below', pv.belowList);
+      el.innerHTML = (pv.qty > 0 ? '= ' + (Math.round(pv.qty * 1000) / 1000) + ' ' + esc(it.product.Unit) + ' (' + (Math.round(pv.cartons * 100) / 100) + ' ctn) · Net <b>' + money(pv.net) + '</b>' : '') +
+        (pv.belowList ? '<div class="badge warn" style="margin-top:4px">Below list price (' + money(pv.listCtn) + '/ctn) — needs the manager\'s approval</div>' : '');
+    }
+
+    function bindCatalogue() {
+      var box = $('#catBox', root);
+      $all('.cat-row', box).forEach(function (row) {
+        var p = st.catalogue.filter(function (x) { return x.ProductID === row.dataset.pid; })[0];
+        pvRow(row);
+        $all('[data-f]', row).forEach(function (inp) { inp.oninput = function () { itemFor(p)[inp.dataset.f] = inp.value; pvRow(row); drawTotals(); }; });
+        $('[data-dm]', row).onchange = function (ev) {
+          var it = itemFor(p); it.DiscountMode = ev.target.value; it.DiscountPct = ''; it.DiscountAmount = '';
+          var d = $('.cat-more [data-f=DiscountPct], .cat-more [data-f=DiscountAmount]', row); d.dataset.f = it.DiscountMode === 'PCT' ? 'DiscountPct' : 'DiscountAmount'; d.value = '';
+          pvRow(row); drawTotals();
+        };
+        $('[data-more]', row).onclick = function () {
+          var it = itemFor(p); it.more = !it.more; $('.cat-more', row).hidden = !it.more;
+          this.innerHTML = it.more ? 'Hide loose units &amp; discount' : 'Loose units &amp; discount';
+        };
+      });
+      var t; $('#catSearch', root).oninput = function (ev) { clearTimeout(t); t = setTimeout(function () { st.filter = ev.target.value; applyFilter(); }, 150); };
+    }
+
+    function applyFilter() {
+      var q = st.filter.toLowerCase().trim(), box = $('#catBox', root); if (!box) return;
+      $all('.cat-row', box).forEach(function (row) { row.style.display = !q || row.dataset.key.indexOf(q) >= 0 || row.classList.contains('on') ? '' : 'none'; });
+      $all('[data-group]', box).forEach(function (g) { g.style.display = $all('.cat-row', g).some(function (r) { return r.style.display !== 'none'; }) ? '' : 'none'; });
+    }
 
     var creditTimer, creditSeq = 0;
     function drawTotals() {
-      var t = { gross: 0, disc: 0, tax: 0, net: 0 };
-      st.lines.forEach(function (l) { var pv = previewLine(l); t.gross += pv.gross; t.disc += pv.disc; t.tax += pv.tax; t.net += pv.net; });
+      var t = { gross: 0, disc: 0, tax: 0, net: 0, ctn: 0, n: 0, below: 0 };
+      lines().forEach(function (l) { var pv = previewLine(l); t.gross += pv.gross; t.disc += pv.disc; t.tax += pv.tax; t.net += pv.net; t.ctn += pv.cartons; t.n++; if (pv.belowList) t.below++; });
+      var bar = $('#catBar', root);
+      if (bar) bar.innerHTML = '<span><b>' + t.n + '</b> product' + (t.n === 1 ? '' : 's') + ' · <b>' + (Math.round(t.ctn * 100) / 100) + '</b> ctn' + (t.below ? ' · <span class="badge warn">' + t.below + ' below list</span>' : '') + '</span><b id="catNet">' + money(Math.round(t.net * 100) / 100) + '</b>';
       var box = $('#totBox', root); if (!box) return;
       box.innerHTML = '<dl class="kv"><dt>Gross</dt><dd>' + money(t.gross) + '</dd><dt>Discount</dt><dd>' + money(t.disc) + '</dd><dt>Tax</dt><dd>' + money(t.tax) + '</dd><dt><b>Net amount</b></dt><dd style="font-size:20px;font-weight:700">' + money(t.net) + '</dd></dl>';
       clearTimeout(creditTimer);
@@ -1714,11 +1828,14 @@
     }
 
     function send(submit, btn) {
-      if (!st.lines.length) return toast('Add at least one product.', true);
+      var ls = lines();
+      if (!ls.length) return toast('Enter cartons for at least one product.', true);
+      if (st.office && !st.spId) { toast('Choose the salesperson who took this order.', true); if ($('#oSp', root)) $('#oSp', root).focus(); return; }
       var payload = { CustomerID: st.customer.CustomerID, Remarks: st.remarks, VisitID: st.visitId, submit: submit,
-        Lines: st.lines.map(function (l) { return { ProductID: l.product.ProductID, Cartons: l.Cartons || 0, LooseUnits: l.LooseUnits || 0,
+        Lines: ls.map(function (l) { return { ProductID: l.product.ProductID, Cartons: l.Cartons || 0, LooseUnits: l.LooseUnits || 0, CartonPrice: l.CartonPrice === '' ? '' : l.CartonPrice,
           DiscountMode: l.DiscountMode === 'PCT' ? 'PCT' : 'AMT', DiscountPct: l.DiscountMode === 'PCT' ? (l.DiscountPct || 0) : 0, DiscountAmount: l.DiscountMode === 'PCT' ? 0 : (l.DiscountAmount || 0) }; }) };
       if (o) { payload.OrderID = o.OrderID; payload.Version = o.Version; } else payload.ClientUUID = st.clientUUID;
+      if (st.office) payload.SalespersonID = st.spId;
       if (st.gps) { payload.Latitude = st.gps.lat; payload.Longitude = st.gps.lng; payload.GPSAccuracy = st.gps.accuracy; }
       busy(btn, true);
       API.call('orders.save', payload).then(function (saved) {
@@ -1808,15 +1925,17 @@
     var a = o.Actions;
     var html = '<div class="card"><div style="display:flex;justify-content:space-between;gap:8px;align-items:start"><div><h2 style="margin:0">' + esc(o.OrderNo) + '</h2><div style="color:var(--muted);font-size:14px">' + fmtDate(o.CreatedAt) + ' · by ' + esc(o.CreatedByName) + '</div></div>' + statusBadge(o.Status) + (o.Archived ? ' <span class="badge">Archived ' + esc(o.ArchiveMonth) + ' · read-only</span>' : '') + '</div>' +
       '<dl class="kv" style="margin-top:12px"><dt>Customer</dt><dd><a href="#/customers/' + encodeURIComponent(o.CustomerID) + '">' + esc(o.Customer.ShopName) + '</a><br><small>' + esc(o.Customer.Code) + ' · ' + esc(o.Customer.Address) + ', ' + esc(o.Customer.Area) + '</small></dd>' +
-      '<dt>Salesperson</dt><dd>' + esc(o.SalespersonName) + '</dd>' +
+      '<dt>Salesperson</dt><dd>' + esc(o.SalespersonName) + (o.AssignedSalespersonName ? '<br><small>Shop\'s salesperson: ' + esc(o.AssignedSalespersonName) + '</small>' : '') + '</dd>' +
       (o.ApprovedAt ? '<dt>Approved</dt><dd>' + fmtDate(o.ApprovedAt) + ' · ' + esc(o.ApprovedByName) + '</dd>' : '') +
       (o.CreditApprovalReason ? '<dt>Credit override</dt><dd>' + esc(o.CreditApprovalReason) + ' — ' + esc(o.CreditApprovedByName) + '</dd>' : '') +
+      (o.PriceStatus === 'BELOW_LIST' ? '<dt>Prices</dt><dd>' + (o.PriceApprovalReason ? 'Below list, approved: ' + esc(o.PriceApprovalReason) + ' — ' + esc(o.PriceApprovedByName) : '<span class="badge warn">Price below list</span> <small>needs the manager\'s approval</small>') + '</dd>' : '') +
       '<dt>QuickBooks</dt><dd>' + (o.QBSyncStatus ? esc(o.QBSyncStatus) + (o.QBTxnID ? ' · ' + esc(o.QBTxnID) : '') + ' <small>(ref ' + esc(o.QBRefNumber) + ')</small>' + (can('qb.manage') ? ' <a href="#/quickbooks?q=' + encodeURIComponent(o.OrderNo) + '">sync details</a>' : '') : '—') + '</dd>' +
       (typeof o.Latitude === 'number' ? '<dt>Order GPS</dt><dd>' + o.Latitude.toFixed(5) + ', ' + o.Longitude.toFixed(5) + ' (±' + Math.round(o.GPSAccuracy) + ' m)</dd>' : '') +
       (o.Remarks ? '<dt>Remarks</dt><dd>' + esc(o.Remarks) + '</dd>' : '') + '</dl></div>';
 
     html += '<div class="card scroll-x"><h2>Items</h2><table class="tbl"><tr><th>Product</th><th>Qty</th><th class="hide-sm">Ctn</th><th class="hide-sm">Rate</th><th class="hide-sm">Disc</th><th class="hide-sm">Tax</th><th style="text-align:right">Net</th></tr>' +
-      o.Lines.map(function (l) { return '<tr><td>' + esc(l.ProductName) + '<br><small>' + esc(l.SKU) + ' · ' + money(l.Rate) + (Number(l.DiscountAmount) ? ' · ' + (l.DiscountMode === 'AMT' ? money(l.DiscountAmount) : l.DiscountPct + '%') + ' off' : '') + '</small></td><td>' + l.Quantity + ' ' + esc(l.Unit) + '<br><small>' + l.Cartons + ' ctn</small></td><td class="hide-sm">' + l.Cartons + '</td><td class="hide-sm">' + money(l.Rate) + '</td><td class="hide-sm">' + (Number(l.DiscountAmount) ? money(l.DiscountAmount) + (l.DiscountMode === 'AMT' ? '' : '<br><small>' + l.DiscountPct + '%</small>') : '') + '</td><td class="hide-sm">' + (l.TaxRate ? l.TaxRate + '%' : '') + '</td><td style="text-align:right;white-space:nowrap">' + money(l.NetAmount) + '</td></tr>'; }).join('') +
+      o.Lines.map(function (l) { return '<tr><td>' + esc(l.ProductName) + '<br><small>' + esc(l.SKU) + ' · ' + (l.CartonPrice !== '' && l.CartonPrice !== undefined ? money(l.CartonPrice) + '/ctn' : money(l.Rate)) +
+        (l.PriceBelowList ? ' <span class="badge warn">below list ' + money(Math.round(l.ListRate * l.UnitsPerCarton * 100) / 100) + '/ctn</span>' : '') + (Number(l.DiscountAmount) ? ' · ' + (l.DiscountMode === 'AMT' ? money(l.DiscountAmount) : l.DiscountPct + '%') + ' off' : '') + '</small></td><td>' + l.Quantity + ' ' + esc(l.Unit) + '<br><small>' + l.Cartons + ' ctn</small></td><td class="hide-sm">' + l.Cartons + '</td><td class="hide-sm">' + money(l.Rate) + '</td><td class="hide-sm">' + (Number(l.DiscountAmount) ? money(l.DiscountAmount) + (l.DiscountMode === 'AMT' ? '' : '<br><small>' + l.DiscountPct + '%</small>') : '') + '</td><td class="hide-sm">' + (l.TaxRate ? l.TaxRate + '%' : '') + '</td><td style="text-align:right;white-space:nowrap">' + money(l.NetAmount) + '</td></tr>'; }).join('') +
       '</table><dl class="kv" style="margin-top:12px"><dt>Gross</dt><dd>' + money(o.GrossAmount) + '</dd><dt>Discount</dt><dd>' + money(o.DiscountAmount) + '</dd><dt>Tax</dt><dd>' + money(o.TaxAmount) + '</dd><dt><b>Net amount</b></dt><dd style="font-size:20px;font-weight:700">' + money(o.NetAmount) + '</dd></dl></div>';
 
     if (o.Credit) html += '<div class="card"><h2>Credit</h2>' + creditPanel(o.Credit) + '</div>';
@@ -1860,10 +1979,19 @@
     if ($('#oReturnGoods', root)) $('#oReturnGoods', root).onclick = function () { returnModal(o.Lines, function () { orderDetail(o.OrderID); }); };
     if ($('#oSubmit', root)) $('#oSubmit', root).onclick = function () { act('orders.submit', {}, this, 'Order submitted.'); };
     if ($('#oApprove', root)) $('#oApprove', root).onclick = function () {
-      if (!a.needsOverride) return act('orders.approve', {}, this, 'Order approved.');
-      if (!a.canOverride) return toast('This order exceeds the credit limit. A user with credit-override rights must approve it.', true);
-      reasonModal('Approve above credit limit', 'Reason for approving above the credit limit *', 'Approve', function (reason) {
-        return API.call('orders.approve', { OrderID: o.OrderID, Version: o.Version, CreditOverrideReason: reason }).then(function (f) { toast('Order approved with credit override.'); return f; });
+      if (!a.needsOverride && !a.needsPriceApproval) return act('orders.approve', {}, this, 'Order approved.');
+      if (a.needsOverride && !a.canOverride) return toast('This order exceeds the credit limit. A user with credit-override rights must approve it.', true);
+      var fld = function (id, label, err) { return '<div class="field"><label for="' + id + '">' + label + '</label><textarea id="' + id + '"></textarea><div class="ferr" data-err="' + err + '"></div></div>'; };
+      modal('Approve order', (a.needsPriceApproval ? '<div class="alert warn">Some products are priced below the catalogue price.</div>' + fld('rPrice', 'Reason for approving these prices *', 'PriceApprovalReason') : '') +
+        (a.needsOverride ? fld('rCredit', 'Reason for approving above the credit limit *', 'CreditOverrideReason') : '') +
+        '<div class="btn-row"><button class="btn primary" id="rOk">Approve</button><button class="btn" id="rNo">Back</button></div>', function (m, close) {
+        $('#rNo', m).onclick = close;
+        $('#rOk', m).onclick = function () {
+          var b = this, pl = { OrderID: o.OrderID, Version: o.Version }; busy(b, true);
+          if ($('#rPrice', m)) pl.PriceApprovalReason = $('#rPrice', m).value.trim();
+          if ($('#rCredit', m)) pl.CreditOverrideReason = $('#rCredit', m).value.trim();
+          API.call('orders.approve', pl).then(function (f) { close(); toast('Order approved.'); drawOrder(f); }).catch(function (e) { busy(b, false); fieldError(m, e); });
+        };
       });
     };
     if ($('#oReturn', root)) $('#oReturn', root).onclick = function () {
@@ -1892,8 +2020,8 @@
         '<div style="text-align:right"><div style="font-size:18px;font-weight:700">SALES ORDER</div><div>' + esc(o.OrderNo) + '</div><div style="font-size:13px">' + fmtDate(o.OrderDate, false) + ' · ' + esc(ORDER_LABELS[o.Status]) + '</div></div></div>' +
         '<hr style="border:0;border-top:1px solid var(--line);margin:14px 0"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px;font-size:14px"><div><b>Customer</b><br>' + esc(o.Customer.ShopName) + ' (' + esc(o.Customer.Code) + ')<br>' + esc(o.Customer.Address) + ', ' + esc(o.Customer.Area) + ', ' + esc(o.Customer.City) + '<br>' + esc(o.Customer.Mobile) + '</div>' +
         '<div><b>Salesperson</b><br>' + esc(o.SalespersonName) + (o.Customer.PaymentTerms ? '<br><b>Terms:</b> ' + esc(o.Customer.PaymentTerms) : '') + '</div></div>' +
-        '<table class="tbl" style="margin-top:14px"><tr><th class="wide">#</th><th>Product</th><th>Qty</th><th class="wide">Cartons</th><th class="wide">Rate</th><th class="wide">Disc</th><th class="wide">Tax</th><th style="text-align:right">Amount</th></tr>' +
-        o.Lines.map(function (l) { return '<tr><td class="wide">' + l.LineNo + '</td><td>' + esc(l.ProductName) + '<br><small>' + esc(l.SKU) + '</small></td><td>' + l.Quantity + ' ' + esc(l.Unit) + '</td><td class="wide">' + l.Cartons + '</td><td class="wide">' + money(l.Rate) + '</td><td class="wide">' + money(l.DiscountAmount) + '</td><td class="wide">' + money(l.TaxAmount) + '</td><td style="text-align:right">' + pkr(l.NetAmount) + '</td></tr>'; }).join('') +
+        '<table class="tbl" style="margin-top:14px"><tr><th class="wide">#</th><th>Product</th><th>Qty</th><th class="wide">Cartons</th><th class="wide">Price</th><th class="wide">Disc</th><th class="wide">Tax</th><th style="text-align:right">Amount</th></tr>' +
+        o.Lines.map(function (l) { return '<tr><td class="wide">' + l.LineNo + '</td><td>' + esc(l.ProductName) + '<br><small>' + esc(l.SKU) + '</small></td><td>' + l.Quantity + ' ' + esc(l.Unit) + '</td><td class="wide">' + l.Cartons + '</td><td class="wide">' + (l.CartonPrice !== '' && l.CartonPrice !== undefined ? money(l.CartonPrice) + '/ctn' : money(l.Rate)) + '</td><td class="wide">' + money(l.DiscountAmount) + '</td><td class="wide">' + money(l.TaxAmount) + '</td><td style="text-align:right">' + pkr(l.NetAmount) + '</td></tr>'; }).join('') +
         '<tr><td colspan="7" class="span-total" style="text-align:right">Gross</td><td style="text-align:right">' + money(o.GrossAmount) + '</td></tr><tr><td colspan="7" class="span-total" style="text-align:right">Discount</td><td style="text-align:right">' + money(o.DiscountAmount) + '</td></tr>' +
         '<tr><td colspan="7" class="span-total" style="text-align:right">Tax</td><td style="text-align:right">' + money(o.TaxAmount) + '</td></tr><tr><td colspan="7" class="span-total" style="text-align:right"><b>Net amount</b></td><td style="text-align:right"><b>' + money(o.NetAmount) + '</b></td></tr></table>' +
         (o.Remarks ? '<p style="font-size:14px"><b>Remarks:</b> ' + esc(o.Remarks) + '</p>' : '') +
@@ -1928,7 +2056,7 @@
           '<dt>QuickBooks</dt><dd>' + esc(b.qbProduct || '—') + '</dd><dt>Company file</dt><dd style="word-break:break-all">' + esc(b.companyFile) + '</dd></dl>';
       }
       html += '<dl class="kv" style="margin-top:8px"><dt>Environment</dt><dd><span class="badge ' + (st.environment === 'PROD' ? 'good' : 'warn') + '">' + esc(st.environment) + '</span> <small>(change in Settings → Qb environment)</small></dd>' +
-        '<dt>Lists imported</dt><dd>' + st.lists.customers + ' customers, ' + st.lists.items + ' items' + (st.listsUpdatedAt ? ' · ' + fmtDate(st.listsUpdatedAt) : '') + '</dd>' +
+        '<dt>Lists imported</dt><dd>' + st.lists.customers + ' customers, ' + st.lists.items + ' items, ' + (st.lists.salesReps || 0) + ' sales reps' + (st.listsUpdatedAt ? ' · ' + fmtDate(st.listsUpdatedAt) : '') + '</dd>' +
         '<dt>Bridge key</dt><dd>' + (st.keyCreatedAt ? 'created ' + fmtDate(st.keyCreatedAt) : '<span class="badge warn">not generated</span>') + '</dd></dl>' +
         (st.canGenerateKey ? '<div class="btn-row"><button class="btn" id="genKey">' + (st.keyCreatedAt ? 'Replace bridge key' : 'Generate bridge key') + '</button></div>' : '') + '</div>';
       var cc = st.customerCreate || { waiting: 0, failed: 0, unlinked: 0 };
@@ -1938,6 +2066,11 @@
         '<dt>Could not be created</dt><dd>' + (cc.failed ? '<a href="#/customers?qbcreate=failed">' + cc.failed + ' — open to see why</a>' : '0') + '</dd>' +
         '<dt>Not linked to QuickBooks</dt><dd>' + cc.unlinked + '</dd></dl>' +
         (cc.unlinked ? '<div class="btn-row"><button class="btn primary" id="qbCreateAll">Create ' + cc.unlinked + ' unlinked customer(s) in QuickBooks</button></div>' : '') + '</div>';
+      var rc = st.salesRepCreate || { waiting: 0, failed: 0, unlinked: 0 };
+      if (rc.waiting || rc.failed) html += '<div class="card"><h2>Salespersons as QuickBooks Sales Reps</h2>' +
+        '<p style="font-size:14px;color:var(--muted)">The salesperson who books an order is sent to QuickBooks as the Sales Rep. A salesperson who is not a Sales Rep yet is created by the bridge (an Other Name with initials); their orders follow automatically.</p><dl class="kv">' +
+        '<dt>Waiting for the bridge</dt><dd>' + rc.waiting + '</dd>' +
+        '<dt>Could not be created</dt><dd>' + (rc.failed ? '<a href="#/salespersons">' + rc.failed + ' — open Salespersons to see why</a>' : '0') + '</dd></dl></div>';
       if (can(['customers.manage', 'products.manage'])) html += '<div class="card"><h2>Create customers and products from QuickBooks</h2>' +
         '<p style="font-size:14px;color:var(--muted)">Creates a Prosol customer for every active QuickBooks customer, and a Prosol product for the QuickBooks items you choose, already mapped. Records that are already mapped are skipped, so it is safe to run again after new customers or items are added in QuickBooks. Nothing is changed in QuickBooks.</p>' +
         (st.lists.customers + st.lists.items ? '<div class="btn-row"><button class="btn primary" id="qbImp">Preview</button></div>' :
@@ -1954,6 +2087,7 @@
           '<span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end"><button class="btn" style="min-height:34px;padding:0 10px" data-log="' + i + '">Log</button>' +
           (x.ErrorCode === 'MAP_CUSTOMER' && x.Status === 'EXCEPTION' ? '<a class="btn" style="min-height:34px;padding:0 10px" href="#/customers/' + encodeURIComponent(x.CustomerID) + '">Fix mapping</a>' : '') +
           (x.ErrorCode === 'MAP_ITEM' && x.Status === 'EXCEPTION' ? '<a class="btn" style="min-height:34px;padding:0 10px" href="#/products?qb=unmapped">Fix mapping</a>' : '') +
+          (x.ErrorCode === 'MAP_SALESREP' && x.Status === 'EXCEPTION' ? '<a class="btn" style="min-height:34px;padding:0 10px" href="#/salespersons?q=' + encodeURIComponent(x.SalespersonName || '') + '">Fix mapping</a>' : '') +
           (x.CanRetry ? '<button class="btn primary" style="min-height:34px;padding:0 10px" data-retry="' + i + '">Retry</button>' : '') + '</span></span></div></li>';
       }).join('') + '</ul>' : '<div class="empty card">Nothing here.</div>';
       var pg = pager(list, function (p) { go('quickbooks?page=' + p + (q.status ? '&status=' + q.status : '') + (q.q ? '&q=' + encodeURIComponent(q.q) : '')); });
@@ -2959,10 +3093,30 @@
   function exportPdf(payload, btn) {
     busy(btn, true);
     return API.call('reports.pdf', payload).then(function (r) {
+      if (r.mime === 'text/html') return printHtml(r, btn);   // Supabase version: the report page is printed / saved as PDF by the phone
       var bin = atob(r.base64), bytes = new Uint8Array(bin.length);
       for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       downloadBlob(r.fileName, new Blob([bytes], { type: 'application/pdf' })); busy(btn, false); toast('PDF ready: ' + r.fileName);
     }).catch(function (e) { busy(btn, false); showError(e); });
+  }
+
+  /** Prints a report page sent by the server (choose "Save as PDF" in the print window). A hidden frame: no pop-up to block. */
+  function printHtml(r, btn) {
+    var bin = atob(r.base64), bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    var html = new TextDecoder('utf-8').decode(bytes);
+    var old = document.getElementById('printFrame'); if (old) old.remove();
+    var fr = document.createElement('iframe');
+    fr.id = 'printFrame'; fr.title = 'Report for printing';
+    fr.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden';
+    fr.setAttribute('sandbox', 'allow-modals allow-same-origin');   // the page has no scripts; it may only be printed
+    document.body.appendChild(fr);
+    fr.srcdoc = html.replace(/<title>[\s\S]*?<\/title>/i, '').replace('<head>', '<head><title>' + esc(String(r.fileName).replace(/\.html$/, '')) + '</title>');
+    fr.onload = function () {
+      busy(btn, false);
+      toast('Choose "Save as PDF" in the print window to keep a PDF.');
+      try { fr.contentWindow.focus(); fr.contentWindow.print(); } catch (e) { showError({ message: 'Printing is not available on this device.' }); }
+    };
   }
 
   // ---------- paper size for printouts: A4 or 80 mm thermal roll ----------
@@ -3250,9 +3404,22 @@
     var cls = pct >= 85 ? 'bad' : pct >= 70 ? 'warn' : 'good';
     return '<div class="cap"><span class="cap-' + cls + '" style="width:' + Math.min(100, pct) + '%"></span></div>';
   }
+  /** System screen of the Supabase version: database size against the plan, no archive (all history stays in one database). */
+  function systemSupabase(hl) {
+    var mb = function (b) { return (Math.round(b / 1024 / 1024 * 10) / 10).toLocaleString() + ' MB'; };
+    var html = (hl.warnings || []).map(function (w) { return '<div class="alert warn">' + esc(w) + '</div>'; }).join('') +
+      '<div class="card"><h2>Database size</h2><p style="font-size:14px;color:var(--muted)">The database is on Supabase (Postgres). All history stays in one database; nothing needs archiving.</p>' +
+      '<dl class="kv"><dt>Live database</dt><dd>' + capBar(hl.main.pct) + hl.main.pct + '% · ' + mb(hl.main.bytes) + ' of ' + mb(hl.limit) + '</dd>' +
+      '<dt>Orders</dt><dd>' + (hl.main.orders || 0).toLocaleString() + (hl.main.firstOrder ? ' since ' + fmtDate(hl.main.firstOrder + 'T12:00:00Z', false) : '') + '</dd>' +
+      '<dt>Backups</dt><dd>Made by Supabase every day (Pro plan) — Supabase dashboard → Database → Backups</dd></dl></div>' +
+      '<div class="card"><h2>Archive</h2><p>' + esc(hl.archive && hl.archive.message || 'No archive is needed.') + '</p></div>';
+    shell('System & archive', html);
+  }
+
   VIEWS.system = function () {
     loading('System & archive');
     API.call('system.health').then(function (hl) {
+      if (hl.supabase) return systemSupabase(hl);
       var a = hl.archive;
       var html = (hl.warnings || []).map(function (w) { return '<div class="alert warn">' + esc(w) + '</div>'; }).join('') +
         '<div class="card"><h2>Database size</h2><p style="font-size:14px;color:var(--muted)">Google Sheets allows 10,000,000 cells per spreadsheet (empty cells count too). Finished history is moved to monthly archive spreadsheets automatically every night.</p>' +
