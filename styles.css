@@ -188,3 +188,8 @@ body.paper-80 .print-doc [style*="justify-content:space-between"] > div { text-a
 .cat-bar b#catNet { font-size: 17px; white-space: nowrap; }
 @media (min-width: 900px) { .cat-bar { bottom: 8px; } .cat-in, .cat-more { grid-template-columns: 160px 200px; } }
 .cat-pv .badge, .cat-bar .badge { white-space: normal; line-height: 1.35; display: inline-block; max-width: 100%; }
+/* order lines: product name with a Remove button */
+.cat-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.cat-head .cat-name { min-width: 0; }
+.cat-del { flex: none; background: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 13px; color: var(--muted); cursor: pointer; min-height: 36px; }
+#prodPick { width: 100%; min-height: 44px; }

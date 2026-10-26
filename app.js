@@ -1663,8 +1663,9 @@
   function orderForm(o, q) {
     var st = {
       clientUUID: uuid(), customer: null, visitId: o ? o.VisitID : (q.visit || ''), remarks: o ? o.Remarks : '',
-      // the catalogue: one entry per product the salesperson has filled in, keyed by ProductID (only rows with a quantity become lines)
-      items: {}, catalogue: null, categories: [], filter: '',
+      // the products chosen for this order (from the searchable product list), keyed by ProductID, in the order they were added;
+      // only rows with a quantity become order lines
+      items: {}, added: [], catalogue: null, categories: [], filter: '',
       gps: null, credit: null,
       // the salesperson who took the order owns it (commission, QuickBooks Sales Rep). A salesperson's login books for themself;
       // an office user chooses, starting from the shop's own salesperson.
@@ -1675,6 +1676,7 @@
       st.items[l.ProductID] = { product: { ProductID: l.ProductID, Name: l.ProductName, SKU: l.SKU, Unit: l.Unit, UnitsPerCarton: upc, WholesalePrice: l.ListRate !== '' && l.ListRate !== undefined ? l.ListRate : l.Rate, TaxRate: l.TaxRate },
         Cartons: full, LooseUnits: Math.round((l.Quantity - full * upc) * 1000) / 1000, CartonPrice: l.CartonPrice !== '' && l.CartonPrice !== undefined ? l.CartonPrice : Math.round(l.Rate * upc * 100) / 100,
         DiscountMode: l.DiscountMode === 'PCT' ? 'PCT' : 'AMT', DiscountPct: l.DiscountPct, DiscountAmount: l.DiscountMode === 'PCT' ? '' : (l.DiscountAmount || 0), more: !!(Number(l.DiscountAmount) || l.Quantity % upc) };
+      if (st.added.indexOf(l.ProductID) < 0) st.added.push(l.ProductID);
     });
     function lines() { return Object.keys(st.items).map(function (k) { return st.items[k]; }).filter(function (it) { return previewLine(it).qty > 0; }); }
     var title = o ? 'Edit ' + o.OrderNo : 'New order';
@@ -1700,8 +1702,11 @@
           (st.office ? '<div class="field" style="margin:12px 0 0"><label for="oSp">Salesperson who took this order *</label><select id="oSp"><option value="">— choose —</option>' +
             (st.spOptions || (st.spId ? [{ id: st.spId, label: (o && o.SalespersonName) || c.SalespersonName || st.spId }] : [])).map(function (x) { return '<option value="' + esc(x.id) + '"' + (x.id === st.spId ? ' selected' : '') + '>' + esc(x.label) + '</option>'; }).join('') +
             '</select><small style="color:var(--muted)">' + (c.SalespersonName ? 'Shop\'s salesperson: ' + esc(c.SalespersonName) + '. ' : 'This shop has no salesperson. ') + 'Commission and the QuickBooks Sales Rep go to the salesperson chosen here.</small></div>' : '') + '</div>';
-        html += '<div class="card"><h2>2. Products</h2><p class="hint" style="font-size:13px;color:var(--muted);margin:0 0 8px">Enter <b>cartons</b> for each product you sell. The price per carton is the catalogue price; change it if you agreed another price (a lower price needs the manager\'s approval).</p>' +
-          '<input type="search" id="catSearch" placeholder="Search product name or SKU" autocomplete="off" value="' + esc(st.filter) + '"><div id="catBox" style="margin-top:10px"><div class="spinner">Loading products…</div></div>' +
+        html += '<div class="card"><h2>2. Products</h2><p class="hint" style="font-size:13px;color:var(--muted);margin:0 0 8px">Choose a product, then enter the <b>cartons</b>. The price per carton is the list price; change it if you agreed another price (a lower price needs the manager\'s approval).</p>' +
+          '<div class="field" style="margin:0"><label for="prodSearch">Add a product</label>' +
+          '<input type="search" id="prodSearch" placeholder="Search product name or SKU" autocomplete="off" value="' + esc(st.filter) + '">' +
+          '<select id="prodPick" aria-label="Product" style="margin-top:6px"><option value="">Loading products…</option></select></div>' +
+          '<div id="catBox" style="margin-top:10px"></div>' +
           '<div class="cat-bar" id="catBar"></div></div>';
         html += '<div class="card"><h2>3. Review</h2><div id="totBox"></div><div class="field" style="margin-top:12px"><label>Remarks</label><textarea id="oRem" placeholder="Delivery instructions, notes">' + esc(st.remarks) + '</textarea></div><div id="credBox"></div>' +
           '<div class="btn-row"><button class="btn" id="saveDraft">Save draft</button><button class="btn primary" id="submitOrder">Submit order</button></div>' +
@@ -1745,20 +1750,67 @@
       });
     }
 
+    /** The product list (searchable dropdown) and the lines of the products chosen so far. */
     function drawCatalogue() {
       var box = $('#catBox', root); if (!box) return;
-      loadCatalogue().then(function (prods) {
-        box = $('#catBox', root); if (!box) return;
-        var catName = {}; st.categories.forEach(function (c) { catName[c.CategoryID] = c.Name; });
-        var groups = {};
-        prods.forEach(function (p) { var g = catName[p.CategoryID] || p.CategoryName || 'Other products'; (groups[g] = groups[g] || []).push(p); });
-        var names = Object.keys(groups).sort(function (a, b) { return a === 'Other products' ? 1 : b === 'Other products' ? -1 : a.localeCompare(b); });
-        box.innerHTML = prods.length ? names.map(function (g) {
-          return '<div class="cat-group" data-group><div class="group-title" style="margin:12px 0 6px">' + esc(g) + '</div>' + groups[g].sort(function (a, b) { return a.Name.localeCompare(b.Name); }).map(rowHtml).join('') + '</div>';
-        }).join('') : '<div class="empty">No active products. Ask the office to add products.</div>';
-        bindCatalogue(); applyFilter(); drawTotals();
+      drawLines();
+      loadCatalogue().then(function () {
+        if (!$('#prodPick', root)) return;
+        fillPick(); bindPicker();
       }).catch(function (e) { box.innerHTML = '<div class="alert bad">' + esc(e.message || 'Products could not be loaded.') + '</div>'; });
     }
+    function productById(id) { return (st.catalogue || []).filter(function (x) { return x.ProductID === id; })[0] || (st.items[id] && st.items[id].product); }
+    function listCtnOf(p) { return Math.round(Number(p.WholesalePrice) * Number(p.UnitsPerCarton) * 100) / 100; }
+    /** Products matching the search that are not on the order yet, grouped by category (category order as before). */
+    function matches() {
+      var q = st.filter.toLowerCase().trim();
+      return (st.catalogue || []).filter(function (p) { return st.added.indexOf(p.ProductID) < 0 && (!q || (p.Name + ' ' + p.SKU).toLowerCase().indexOf(q) >= 0); });
+    }
+    function fillPick() {
+      var sel = $('#prodPick', root); if (!sel) return;
+      var catName = {}; st.categories.forEach(function (c) { catName[c.CategoryID] = c.Name; });
+      var found = matches(), groups = {};
+      found.forEach(function (p) { var g = catName[p.CategoryID] || p.CategoryName || 'Other products'; (groups[g] = groups[g] || []).push(p); });
+      var names = Object.keys(groups).sort(function (a, b) { return a === 'Other products' ? 1 : b === 'Other products' ? -1 : a.localeCompare(b); });
+      var head = !(st.catalogue || []).length ? 'No active products — ask the office to add products'
+        : found.length ? '— choose a product (' + found.length + ') —' : (st.filter ? 'No product matches "' + st.filter + '"' : 'All products are on the order');
+      sel.innerHTML = '<option value="">' + esc(head) + '</option>' + names.map(function (g) {
+        return '<optgroup label="' + esc(g) + '">' + groups[g].sort(function (a, b) { return a.Name.localeCompare(b.Name); }).map(function (p) {
+          return '<option value="' + esc(p.ProductID) + '" data-sku="' + esc(p.SKU) + '">' + esc(p.Name) + ' · ' + esc(p.SKU) + ' · ' + money(listCtnOf(p)) + '/ctn</option>';
+        }).join('') + '</optgroup>';
+      }).join('');
+    }
+    function bindPicker() {
+      var sel = $('#prodPick', root), inp = $('#prodSearch', root), t;
+      sel.onchange = function () { if (sel.value) addProduct(sel.value); };
+      inp.oninput = function () { clearTimeout(t); t = setTimeout(function () { st.filter = inp.value; fillPick(); }, 150); };
+      // Enter: one match → add it; more → open the list
+      inp.onkeydown = function (ev) {
+        if (ev.key !== 'Enter') return;
+        ev.preventDefault(); clearTimeout(t); st.filter = inp.value; fillPick();
+        var found = matches();
+        if (found.length === 1) addProduct(found[0].ProductID); else sel.focus();
+      };
+    }
+    function addProduct(id) {
+      var p = productById(id); if (!p) return;
+      itemFor(p);
+      if (st.added.indexOf(id) < 0) st.added.push(id);
+      st.filter = ''; var inp = $('#prodSearch', root); if (inp) inp.value = '';
+      fillPick(); drawLines();
+      var c = $('.cat-row[data-pid="' + cssEsc(id) + '"] [data-f=Cartons]', root); if (c) c.focus();
+    }
+    function removeProduct(id) {
+      delete st.items[id]; st.added = st.added.filter(function (x) { return x !== id; });
+      fillPick(); drawLines();
+    }
+    function drawLines() {
+      var box = $('#catBox', root); if (!box) return;
+      box.innerHTML = st.added.length ? st.added.map(function (id) { return rowHtml(productById(id)); }).join('')
+        : '<div class="empty" style="padding:12px 0">No products yet — choose one above.</div>';
+      bindCatalogue(); drawTotals();
+    }
+    function cssEsc(s) { return String(s).replace(/["\\]/g, '\\$&'); }
 
     function itemFor(p) {
       return st.items[p.ProductID] || (st.items[p.ProductID] = { product: p, Cartons: '', LooseUnits: '', CartonPrice: Math.round(Number(p.WholesalePrice) * Number(p.UnitsPerCarton) * 100) / 100,
@@ -1769,7 +1821,8 @@
       var it = st.items[p.ProductID] || { Cartons: '', LooseUnits: '', CartonPrice: Math.round(Number(p.WholesalePrice) * Number(p.UnitsPerCarton) * 100) / 100, DiscountMode: 'AMT', DiscountAmount: '', DiscountPct: '', more: false };
       var id = esc(p.ProductID), listCtn = Math.round(Number(p.WholesalePrice) * Number(p.UnitsPerCarton) * 100) / 100;
       return '<div class="cat-row" data-pid="' + id + '" data-sku="' + esc(p.SKU) + '" data-key="' + esc((p.Name + ' ' + p.SKU).toLowerCase()) + '">' +
-        '<div class="cat-name"><b>' + esc(p.Name) + '</b><small>' + esc(p.SKU) + ' · ' + esc(p.UnitsPerCarton) + ' ' + esc(p.Unit) + ' per carton · list ' + money(listCtn) + '/ctn</small></div>' +
+        '<div class="cat-head"><div class="cat-name"><b>' + esc(p.Name) + '</b><small>' + esc(p.SKU) + ' · ' + esc(p.UnitsPerCarton) + ' ' + esc(p.Unit) + ' per carton · list ' + money(listCtn) + '/ctn</small></div>' +
+        '<button type="button" class="cat-del" data-del aria-label="Remove ' + esc(p.Name) + '">Remove</button></div>' +
         '<div class="cat-in"><label>Cartons<input type="number" inputmode="numeric" min="0" step="1" data-f="Cartons" value="' + esc(it.Cartons) + '" placeholder="0"></label>' +
         '<label>Price per carton<input type="number" inputmode="decimal" min="0" step="any" data-f="CartonPrice" value="' + esc(it.CartonPrice) + '"></label></div>' +
         '<button type="button" class="cat-more-btn" data-more>' + (it.more ? 'Hide loose units &amp; discount' : 'Loose units &amp; discount') + '</button>' +
@@ -1791,8 +1844,9 @@
     function bindCatalogue() {
       var box = $('#catBox', root);
       $all('.cat-row', box).forEach(function (row) {
-        var p = st.catalogue.filter(function (x) { return x.ProductID === row.dataset.pid; })[0];
+        var p = productById(row.dataset.pid);
         pvRow(row);
+        $('[data-del]', row).onclick = function () { removeProduct(row.dataset.pid); };
         $all('[data-f]', row).forEach(function (inp) { inp.oninput = function () { itemFor(p)[inp.dataset.f] = inp.value; pvRow(row); drawTotals(); }; });
         $('[data-dm]', row).onchange = function (ev) {
           var it = itemFor(p); it.DiscountMode = ev.target.value; it.DiscountPct = ''; it.DiscountAmount = '';
@@ -1804,13 +1858,6 @@
           this.innerHTML = it.more ? 'Hide loose units &amp; discount' : 'Loose units &amp; discount';
         };
       });
-      var t; $('#catSearch', root).oninput = function (ev) { clearTimeout(t); t = setTimeout(function () { st.filter = ev.target.value; applyFilter(); }, 150); };
-    }
-
-    function applyFilter() {
-      var q = st.filter.toLowerCase().trim(), box = $('#catBox', root); if (!box) return;
-      $all('.cat-row', box).forEach(function (row) { row.style.display = !q || row.dataset.key.indexOf(q) >= 0 || row.classList.contains('on') ? '' : 'none'; });
-      $all('[data-group]', box).forEach(function (g) { g.style.display = $all('.cat-row', g).some(function (r) { return r.style.display !== 'none'; }) ? '' : 'none'; });
     }
 
     var creditTimer, creditSeq = 0;
@@ -1831,7 +1878,7 @@
 
     function send(submit, btn) {
       var ls = lines();
-      if (!ls.length) return toast('Enter cartons for at least one product.', true);
+      if (!ls.length) return toast(st.added.length ? 'Enter cartons for at least one product.' : 'Choose a product first.', true);
       if (st.office && !st.spId) { toast('Choose the salesperson who took this order.', true); if ($('#oSp', root)) $('#oSp', root).focus(); return; }
       var payload = { CustomerID: st.customer.CustomerID, Remarks: st.remarks, VisitID: st.visitId, submit: submit,
         Lines: ls.map(function (l) { return { ProductID: l.product.ProductID, Cartons: l.Cartons || 0, LooseUnits: l.LooseUnits || 0, CartonPrice: l.CartonPrice === '' ? '' : l.CartonPrice,
