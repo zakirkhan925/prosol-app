@@ -193,3 +193,8 @@ body.paper-80 .print-doc [style*="justify-content:space-between"] > div { text-a
 .cat-head .cat-name { min-width: 0; }
 .cat-del { flex: none; background: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 13px; color: var(--muted); cursor: pointer; min-height: 36px; }
 #prodPick { width: 100%; min-height: 44px; }
+/* payment at delivery */
+.pay-opts { display: grid; gap: 6px; }
+.pay-opt { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 15px; min-height: 44px; cursor: pointer; background: var(--card); }
+.pay-opt input { width: 20px; height: 20px; margin: 0; flex: none; }
+.pay-opt:has(input:checked) { border-color: var(--brand-2); box-shadow: inset 3px 0 0 var(--brand-2); }

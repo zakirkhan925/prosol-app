@@ -405,6 +405,7 @@
   function r2(n) { return Math.round((n + Number.EPSILON) * 100) / 100; }
 
   /** A trip as the phone currently knows it: last server copy plus deliveries recorded on this phone but not yet sent. */
+  var PAY_LABEL = { CASH: 'Cash', PART: 'Part cash', CREDIT: 'Credit', '': 'Not recorded' };
   function overlayTrip(t0) {
     var t = clone(t0), items = Outbox.pending().filter(function (i) { return i.action.indexOf('delivery.') === 0; });
     if (!items.length) return t;
@@ -425,6 +426,10 @@
         l.Delivered = r3(Number(l.Delivered) + d); l.Outstanding = r3(Math.max(0, Number(l.Outstanding) - d));
       });
       s.DeliveredNet = r2(net); s.Remarks = i.payload.Remarks || '';
+      // the payment as recorded on the phone (estimate: the office works out the bill when it arrives)
+      var pm = i.payload.PaymentMode || '', cashIn = pm === 'CASH' ? s.DeliveredNet : pm === 'PART' ? r2(Number(i.payload.CashCollected) || 0) : 0;
+      s.PaymentMode = pm === 'PART' && cashIn >= s.DeliveredNet ? 'CASH' : pm; s.PaymentLabel = PAY_LABEL[s.PaymentMode] || 'Not recorded';
+      s.CashCollected = pm ? cashIn : ''; s.CreditAmount = pm ? r2(Math.max(0, s.DeliveredNet - cashIn)) : '';
       s.Status = s.Lines.every(function (l) { return l.Outstanding <= 0; }) ? 'DELIVERED' : 'PARTIAL';
       s.Remaining = s.Lines.reduce(function (a, l) { a.cartons += l.Outstanding / l.UnitsPerCarton; a.value += l.Outstanding * Number(l.Rate); return a; }, { cartons: 0, value: 0 });
       s.Remaining.cartons = Math.round(s.Remaining.cartons * 100) / 100; s.Remaining.value = r2(s.Remaining.value);
@@ -824,6 +829,8 @@
     { path: 'trips', label: 'Trips', ic: '🚛', perm: ['delivery.plan', 'delivery.view.all'], routePerm: ['delivery.plan', 'delivery.view.all', 'delivery.own'] },
     { path: 'returns', label: 'Returns', ic: '↩', perm: ['returns.create', 'returns.approve', 'delivery.view.all'] },
     { path: 'gpsreview', label: 'GPS review', ic: '🛰', perm: ['delivery.plan', 'delivery.view.all'] },
+    { path: 'cash', label: 'Cash collection', ic: '💵', perm: 'cash.view' },
+    { path: 'gpsfill', label: 'Shop GPS from deliveries', ic: '📍', perm: 'customers.manage' },
     { path: 'fleet', label: 'Fleet', ic: '🚐', perm: ['drivers.manage', 'vehicles.manage'] },
     { path: 'commission', label: 'Commission', ic: '💰', perm: ['commission.view.all', 'commission.view.own'] },
     { path: 'commrules', label: 'Commission rates', ic: '⚖', perm: ['commission.rules', 'commission.view.all'] },
@@ -833,7 +840,7 @@
     { path: 'audit', label: 'Audit log', ic: '📜', perm: 'audit.view' },
     { path: 'backups', label: 'Backups', ic: '💾', perm: 'backup.run' },
     { path: 'system', label: 'System & archive', ic: '🗄', perm: 'settings.manage' },
-    { path: 'reports', label: 'Reports', ic: '📊', perm: ['orders.view.all', 'orders.view.own', 'delivery.view.all', 'delivery.plan', 'visits.view.all', 'qb.manage', 'customers.view.all', 'commission.view.all', 'commission.view.own'] },
+    { path: 'reports', label: 'Reports', ic: '📊', perm: ['orders.view.all', 'orders.view.own', 'delivery.view.all', 'delivery.plan', 'visits.view.all', 'qb.manage', 'customers.view.all', 'commission.view.all', 'commission.view.own', 'cash.view'] },
     { path: 'custmap', label: 'Customer map', ic: '🗺', perm: 'customers.view.all', routePerm: ['customers.view.all', 'customers.view.own'] },
     { path: 'outbox', label: 'Outbox', ic: '📤', perm: ['orders.create', 'visits.create', 'customers.location', 'delivery.own', 'returns.create'] },
     { path: 'more', label: 'More', ic: '☰', perm: null, mobileOnly: true },
@@ -2487,12 +2494,21 @@
         '<div class="field" style="margin-top:12px"><label>Remarks</label><input type="text" id="dRem" placeholder="e.g. received by owner"></div>' +
         '<div class="field"><label>Delivery photo (optional)</label><input type="file" accept="image/*" capture="environment" id="dPhoto"><img id="dPhotoPrev" alt="" style="max-width:160px;display:none;margin-top:6px;border-radius:8px"></div>' +
         '<div class="field"><label>Customer signature (optional)</label><canvas id="sig" width="600" height="200" style="width:100%;max-width:420px;height:140px;border:1px solid var(--line);border-radius:10px;background:#fff;touch-action:none"></canvas><div><button type="button" class="btn" id="sigClear" style="min-height:36px;margin-top:6px">Clear signature</button></div></div>' +
+        '<div class="field pay-box" id="payBox"><label>Payment *</label>' +
+          '<div class="pay-opts">' +
+          '<label class="pay-opt"><input type="radio" name="pay" value="CASH"> <b>Cash</b> — whole bill</label>' +
+          '<label class="pay-opt"><input type="radio" name="pay" value="PART"> <b>Part cash</b> — rest on credit</label>' +
+          '<label class="pay-opt"><input type="radio" name="pay" value="CREDIT"> <b>Credit</b> — not paid now</label></div>' +
+          '<div id="payAmt" hidden style="margin-top:8px"><label style="font-size:13px">Cash collected (PKR)<input type="number" inputmode="decimal" min="0" step="any" id="dCash"></label></div>' +
+          '<div id="payInfo" style="font-size:13px;margin-top:6px;color:var(--muted)"></div><div class="ferr" data-err="CashCollected"></div><div class="ferr" data-err="PaymentMode"></div></div>' +
         '<div class="btn-row"><button class="btn primary" type="submit" id="dOk">✔ Confirm delivery</button><button class="btn danger" type="button" id="dFail">Could not deliver</button></div>' +
         '<p class="hint" style="font-size:12px;color:var(--muted)">Your GPS position is recorded and compared with the shop location.</p></form>';
     } else {
       html += '<div class="card"><h2>Result</h2>' + (s.LocalPending ? '<div class="alert warn">Saved on this phone — waiting to be sent. Values shown are estimates until the office receives it.</div>' : '') + '<dl class="kv"><dt>Status</dt><dd>' + stopBadge(s.Status) + '</dd><dt>When</dt><dd>' + fmtDate(s.DeliveredAt) + ' · ' + esc(s.ConfirmedByName) + '</dd>' +
         '<dt>GPS</dt><dd>' + (gpsStopBadge(s) || '—') + (s.OverrideReason ? '<br><small>' + esc(s.OverrideReason) + '</small>' : '') + '</dd>' + (s.Remarks ? '<dt>Remarks</dt><dd>' + esc(s.Remarks) + '</dd>' : '') +
-        '<dt>Delivered value</dt><dd>' + money(s.DeliveredNet) + '</dd></dl>' +
+        '<dt>Delivered value</dt><dd>' + money(s.DeliveredNet) + '</dd>' +
+        (s.Status === 'DELIVERED' || s.Status === 'PARTIAL' ? '<dt>Payment</dt><dd>' + esc(s.PaymentLabel || 'Not recorded') +
+          (s.PaymentMode ? ' · cash ' + money(Number(s.CashCollected) || 0) + (Number(s.CreditAmount) > 0 ? ' · <b>credit ' + money(s.CreditAmount) + '</b>' : '') : '') + '</dd>' : '') + '</dl>' +
         '<table class="tbl" style="margin-top:10px"><tr><th>Product</th><th>This stop</th><th>Still to deliver</th></tr>' + s.Lines.map(function (l) {
           return '<tr><td>' + esc(l.ProductName) + '</td><td>' + (l.ThisStopQty === '' ? '—' : qty(l.ThisStopQty) + ' ' + esc(l.Unit)) + '</td><td>' + (l.Outstanding > 0 ? '<b>' + qty(l.Outstanding) + '</b>' : '0') + '</td></tr>';
         }).join('') + '</table>' +
@@ -2510,8 +2526,22 @@
 
     // quantities
     var units = function (i) { var l = s.Lines[i]; return (Number($('[data-ctn="' + i + '"]', root).value) || 0) * l.UnitsPerCarton + (Number($('[data-loose="' + i + '"]', root).value) || 0); };
+    // the bill of what is being delivered (estimate from the order's prices; the office works out the exact amount)
+    var billEstimate = function () { return Math.round(s.Lines.reduce(function (a, l, i) {
+      var g = units(i) * Number(l.Rate), d = g * (Number(l.DiscountPct) || 0) / 100; return a + (g - d) * (1 + (Number(l.TaxRate) || 0) / 100); }, 0) * 100) / 100; };
+    var payMode = function () { var r = $('input[name=pay]:checked', root); return r ? r.value : ''; };
+    var showPay = function () {
+      var m = payMode(), bill = billEstimate(), info = $('#payInfo', root);
+      $('#payAmt', root).hidden = m !== 'PART';
+      var cash = Number($('#dCash', root).value) || 0;
+      info.innerHTML = 'Bill ≈ <b>' + money(bill) + '</b>' + (m === 'CASH' ? ' · collect the whole bill in cash' : m === 'CREDIT' ? ' · <b>whole bill on credit</b>'
+        : m === 'PART' ? (cash > 0 ? ' · on credit ≈ <b>' + money(Math.max(0, Math.round((bill - cash) * 100) / 100)) + '</b>' : ' · type the cash collected') : '');
+    };
     var showSum = function (i) { var l = s.Lines[i], u = units(i); var el = $('[data-sum="' + i + '"]', root);
-      el.innerHTML = '= ' + qty(u) + ' ' + esc(l.Unit) + (u > l.Outstanding ? ' <span class="badge bad">more than ordered</span>' : u < l.Outstanding && u > 0 ? ' <span class="badge warn">partial — ' + qty(l.Outstanding - u) + ' left</span>' : u === 0 ? ' <span class="badge">none</span>' : ' <span class="badge good">all</span>'); };
+      el.innerHTML = '= ' + qty(u) + ' ' + esc(l.Unit) + (u > l.Outstanding ? ' <span class="badge bad">more than ordered</span>' : u < l.Outstanding && u > 0 ? ' <span class="badge warn">partial — ' + qty(l.Outstanding - u) + ' left</span>' : u === 0 ? ' <span class="badge">none</span>' : ' <span class="badge good">all</span>');
+      if ($('#payInfo', root)) showPay(); };
+    $all('input[name=pay]', root).forEach(function (r) { r.onchange = function () { showPay(); if (r.value === 'PART') $('#dCash', root).focus(); }; });
+    $('#dCash', root).oninput = showPay;
     var setAll = function (full) { s.Lines.forEach(function (l, i) {
       var o = full ? l.Outstanding : 0, ctn = Math.floor(o / l.UnitsPerCarton + 1e-9);
       $('[data-ctn="' + i + '"]', root).value = ctn; $('[data-loose="' + i + '"]', root).value = Math.round((o - ctn * l.UnitsPerCarton) * 1000) / 1000; showSum(i); }); };
@@ -2550,8 +2580,13 @@
       ev.preventDefault();
       var lines = s.Lines.map(function (l, i) { return { OrderLineID: l.OrderLineID, Quantity: Math.round(units(i) * 1000) / 1000 }; });
       if (!lines.some(function (l) { return l.Quantity > 0; })) return toast('Enter what was delivered, or use "Could not deliver".', true);
+      var pm = payMode();
+      if (!pm) { toast('Choose how the shop paid: Cash, Part cash or Credit.', true); $('#payBox', root).scrollIntoView({ block: 'center' }); return; }
+      var cashIn = $('#dCash', root).value;
+      if (pm === 'PART' && !(Number(cashIn) > 0)) { toast('Type the cash collected (or choose Credit if nothing was paid).', true); $('#dCash', root).focus(); return; }
       var btn = $('#dOk', root); busy(btn, true);
-      var payload = { DeliveryOrderID: s.DeliveryOrderID, ClientUUID: clientUUID, Lines: lines, Remarks: $('#dRem', root).value, Photo: photoData, Signature: signed ? cv.toDataURL('image/png') : null };
+      var payload = { DeliveryOrderID: s.DeliveryOrderID, ClientUUID: clientUUID, Lines: lines, Remarks: $('#dRem', root).value, Photo: photoData, Signature: signed ? cv.toDataURL('image/png') : null,
+        PaymentMode: pm, CashCollected: pm === 'PART' ? Number(cashIn) : '' };
       var send = function (extra) {
         return API.call('delivery.confirm', Object.assign({}, payload, extra || {})).then(function (fresh) {
           toast(savedMsg(fresh, 'Delivery confirmed.'));
@@ -2666,6 +2701,108 @@
       var root = shell('GPS review', html);
       $all('[data-rv]', root).forEach(function (b) { b.onclick = function () { var x = list.items[Number(b.dataset.rv)]; busy(b, true);
         API.call('delivery.reviewGps', { DeliveryOrderID: x.DeliveryOrderID }).then(function () { toast('Marked reviewed.'); render(); }).catch(function (e) { busy(b, false); showError(e); }); }; });
+    }).catch(showError);
+  };
+
+  // ---------- cash collected by drivers (office) ----------
+  VIEWS.cash = function (r) {
+    var q = r.q;
+    loading('Cash collection');
+    API.call('cash.summary', { from: q.from || '', to: q.to || '', driverId: q.driver || '' }).then(function (res) {
+      var tot = res.rows.reduce(function (a, x) { a.cash += x.Cash; a.credit += x.Credit; a.waiting += x.Waiting; return a; }, { cash: 0, credit: 0, waiting: 0 });
+      var html = '<form class="card" id="cashF"><div class="filters" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' +
+        '<label style="font-size:13px">From<input type="date" id="cFrom" value="' + esc(res.from) + '"></label><label style="font-size:13px">To<input type="date" id="cTo" value="' + esc(res.to) + '"></label>' +
+        '<label style="font-size:13px;grid-column:1/-1">Driver<select id="cDrv"><option value="">All drivers</option>' + res.drivers.map(function (d) { return '<option value="' + esc(d.id) + '"' + (d.id === q.driver ? ' selected' : '') + '>' + esc(d.label) + '</option>'; }).join('') + '</select></label></div>' +
+        '<div class="btn-row"><button class="btn primary" type="submit">Show</button><a class="btn" href="#/reports/cash">Report</a><a class="btn" href="#/reports/credit">Credit deliveries</a></div>' +
+        '<p style="margin:8px 0 0;font-size:14px">Cash collected <b>' + money(Math.round(tot.cash * 100) / 100) + '</b> · on credit <b>' + money(Math.round(tot.credit * 100) / 100) + '</b>' +
+        (tot.waiting > 0 ? ' · <span class="badge warn">not yet received ' + money(Math.round(tot.waiting * 100) / 100) + '</span>' : '') + '</p></form>';
+      html += res.rows.length ? res.rows.map(function (x, i) {
+        return '<div class="card"><div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><div><b>' + esc(x.DriverName) + '</b><div style="color:var(--muted);font-size:13px">' + fmtDate(x.Date, false) + ' · ' + x.Stops + ' deliver' + (x.Stops === 1 ? 'y' : 'ies') + '</div></div>' +
+          (x.Waiting > 0 ? '<span class="badge warn">Cash waiting</span>' : x.Cash > 0 ? '<span class="badge good">Cash received</span>' : '') + '</div>' +
+          '<dl class="kv" style="margin-top:8px"><dt>Bills</dt><dd>' + money(x.Bill) + '</dd><dt>Cash collected</dt><dd><b>' + money(x.Cash) + '</b></dd><dt>On credit</dt><dd>' + money(x.Credit) + '</dd>' +
+          (x.Received > 0 ? '<dt>Received by office</dt><dd>' + money(x.CashHandedOver) + (x.Difference ? ' <span class="badge ' + (x.Difference < 0 ? 'bad' : 'warn') + '">' + (x.Difference < 0 ? 'short ' : 'over ') + money(Math.abs(x.Difference)) + '</span>' : '') +
+            (x.ReceivedByName ? '<br><small>' + esc(x.ReceivedByName) + (x.Remarks ? ' — ' + esc(x.Remarks) : '') + '</small>' : '') + '</dd>' : '') +
+          (x.Waiting > 0 ? '<dt>Not yet received</dt><dd><b>' + money(x.Waiting) + '</b></dd>' : '') +
+          (x.NotRecorded ? '<dt>Payment not recorded</dt><dd>' + x.NotRecorded + '</dd>' : '') + '</dl>' +
+          '<div class="btn-row"><button class="btn" data-det="' + i + '">Details</button>' + (res.canReceive && x.Waiting > 0 ? '<button class="btn primary" data-rcv="' + i + '">Cash received</button>' : '') + '</div></div>';
+      }).join('') : '<div class="empty card">No deliveries in these dates.</div>';
+      var root = shell('Cash collection', html);
+      $('#cashF', root).onsubmit = function (ev) { ev.preventDefault();
+        go('cash?from=' + encodeURIComponent($('#cFrom', root).value) + '&to=' + encodeURIComponent($('#cTo', root).value) + '&driver=' + encodeURIComponent($('#cDrv', root).value)); };
+      $all('[data-rcv]', root).forEach(function (b) { b.onclick = function () { receiveCash(res.rows[Number(b.dataset.rcv)]); }; });
+      $all('[data-det]', root).forEach(function (b) { b.onclick = function () { cashDay(res.rows[Number(b.dataset.det)], res.canReceive); }; });
+    }).catch(showError);
+  };
+  function receiveCash(x) {
+    modal('Cash received from ' + x.DriverName, '<p style="margin:0 0 8px">' + fmtDate(x.Date, false) + ' · cash collected and not yet received: <b>' + money(x.Waiting) + '</b></p>' +
+      '<div class="field"><label>Cash received (PKR) *</label><input type="number" inputmode="decimal" min="0" step="any" id="rcAmt" value="' + x.Waiting + '"><div class="ferr" data-err="CashReceived"></div></div>' +
+      '<div class="field"><label>Remarks (needed when the amount differs)</label><input type="text" id="rcRem" placeholder="e.g. short 300, brings it tomorrow"><div class="ferr" data-err="Remarks"></div></div>' +
+      '<div class="btn-row"><button class="btn primary" id="rcOk">Confirm cash received</button><button class="btn" id="rcNo">Back</button></div>', function (m, close) {
+      $('#rcNo', m).onclick = close;
+      $('#rcOk', m).onclick = function () {
+        var b = this; busy(b, true);
+        API.call('cash.receive', { DriverID: x.DriverID, Date: x.Date, CashReceived: $('#rcAmt', m).value, Remarks: $('#rcRem', m).value }).then(function (h) {
+          close(); toast('Cash received: ' + money(h.CashReceived) + (h.Difference ? ' (' + (h.Difference < 0 ? 'short ' : 'over ') + money(Math.abs(h.Difference)) + ')' : '') + '.'); render();
+        }).catch(function (e) { busy(b, false); fieldError(m, e); });
+      };
+    });
+  }
+  function cashDay(x, canFix) {
+    API.call('cash.dayStops', { DriverID: x.DriverID, Date: x.Date }).then(function (list) {
+      modal(x.DriverName + ' · ' + fmtDate(x.Date, false), '<div class="scroll-x"><table class="tbl"><tr><th>Shop</th><th>Bill</th><th>Payment</th><th>Cash</th><th>Credit</th><th></th></tr>' + list.map(function (s, i) {
+        return '<tr><td>' + esc(s.Customer) + '<br><small>' + esc(s.OrderNo) + ' · ' + esc(s.TripNo) + '</small></td><td class="n">' + money(s.Bill) + '</td><td>' + esc(s.PaymentLabel) + (s.Received ? '<br><span class="badge good">received</span>' : '') + '</td>' +
+          '<td class="n">' + money(s.Cash) + '</td><td class="n">' + money(s.Credit) + '</td><td>' + (canFix && !s.Received ? '<button class="btn" style="min-height:32px;padding:0 8px" data-fix="' + i + '">Correct</button>' : '') + '</td></tr>';
+      }).join('') + '</table></div><div class="btn-row"><button class="btn" id="cdClose">Close</button></div>', function (m, close) {
+        $('#cdClose', m).onclick = close;
+        $all('[data-fix]', m).forEach(function (b) { b.onclick = function () { close(); fixPayment(list[Number(b.dataset.fix)]); }; });
+      });
+    }).catch(showError);
+  }
+  function fixPayment(s) {
+    modal('Correct payment — ' + s.Customer, '<p style="margin:0 0 8px">' + esc(s.OrderNo) + ' · bill <b>' + money(s.Bill) + '</b> · now: ' + esc(s.PaymentLabel) + '</p>' +
+      '<div class="field"><label>Payment *</label><select id="fpMode"><option value="CASH">Cash — whole bill</option><option value="PART">Part cash — rest on credit</option><option value="CREDIT">Credit — not paid</option></select></div>' +
+      '<div class="field" id="fpAmtF" hidden><label>Cash collected (PKR) *</label><input type="number" inputmode="decimal" min="0" step="any" id="fpAmt"><div class="ferr" data-err="CashCollected"></div></div>' +
+      '<div class="field"><label>Reason *</label><input type="text" id="fpRsn" placeholder="e.g. driver chose Credit by mistake"><div class="ferr" data-err="Reason"></div></div>' +
+      '<div class="btn-row"><button class="btn primary" id="fpOk">Save</button><button class="btn" id="fpNo">Back</button></div>', function (m, close) {
+      var sel = $('#fpMode', m); sel.value = s.PaymentMode || 'CASH';
+      var sync = function () { $('#fpAmtF', m).hidden = sel.value !== 'PART'; }; sel.onchange = sync; sync();
+      $('#fpNo', m).onclick = close;
+      $('#fpOk', m).onclick = function () {
+        var b = this; busy(b, true);
+        API.call('cash.setPayment', { DeliveryOrderID: s.DeliveryOrderID, PaymentMode: sel.value, CashCollected: sel.value === 'PART' ? $('#fpAmt', m).value : '', Reason: $('#fpRsn', m).value })
+          .then(function (r2) { close(); toast('Payment corrected: ' + r2.PaymentLabel + '.'); render(); }).catch(function (e) { busy(b, false); fieldError(m, e); });
+      };
+    });
+  }
+
+  // ---------- shop GPS from deliveries (shops without a saved location) ----------
+  VIEWS.gpsfill = function () {
+    loading('Shop GPS from deliveries');
+    API.call('customers.gpsFromDeliveriesPreview').then(function (res) {
+      var html = '<div class="card"><p style="margin:0">For shops that have <b>no saved GPS location</b>, the driver\'s position when a delivery there was confirmed can become the shop\'s location. ' +
+        'A shop that already has a location is never changed. Only positions accurate to ' + res.maxAccuracy + ' m or better are used (the most accurate delivery of each shop).</p>' +
+        '<p style="margin:8px 0 0;font-size:14px;color:var(--muted)">Shops without GPS: <b>' + res.shopsWithoutGps + '</b> · can be filled now: <b>' + res.rows.length + '</b> · no usable delivery yet: ' + res.noUsableDelivery +
+        (res.tooVague ? ' (of which ' + res.tooVague + ' only with a GPS less accurate than ' + res.maxAccuracy + ' m)' : '') + '</p></div>';
+      if (res.rows.length) html += '<div class="card"><label style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><input type="checkbox" id="gfAll" checked> Select all</label><ul class="list">' + res.rows.map(function (x, i) {
+        return '<li><label class="row" style="cursor:pointer;gap:10px"><input type="checkbox" data-gf="' + i + '" checked style="width:20px;height:20px;flex:none"><span class="main-t"><div class="t1">' + esc(x.ShopName) + ' <small>' + esc(x.Code) + '</small></div>' +
+          '<div class="t2">' + esc(x.Area) + ' · ' + esc(x.OrderNo) + ' · ' + esc(x.DriverName) + ' · ' + fmtDate(x.DeliveredAt) + ' · ±' + Math.round(x.Accuracy) + ' m</div></span>' +
+          '<a class="btn" style="min-height:34px;padding:0 10px;flex:none" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=' + x.Latitude + ',' + x.Longitude + '">Map</a></label></li>';
+      }).join('') + '</ul><div class="btn-row"><button class="btn primary" id="gfSave">Save locations</button></div></div>';
+      else html += '<div class="empty card">Nothing to fill right now.</div>';
+      var root = shell('Shop GPS from deliveries', html);
+      if (!res.rows.length) return;
+      var boxes = $all('[data-gf]', root), save = $('#gfSave', root);
+      var count = function () { var n = boxes.filter(function (b) { return b.checked; }).length; save.textContent = 'Save locations for ' + n + ' shop' + (n === 1 ? '' : 's'); save.disabled = !n; };
+      boxes.forEach(function (b) { b.onchange = count; });
+      $('#gfAll', root).onchange = function (ev) { boxes.forEach(function (b) { b.checked = ev.target.checked; }); count(); };
+      count();
+      save.onclick = function () {
+        var ids = boxes.filter(function (b) { return b.checked; }).map(function (b) { return res.rows[Number(b.dataset.gf)].CustomerID; });
+        busy(save, true);
+        API.call('customers.gpsFromDeliveries', { CustomerIDs: ids }).then(function (r2) {
+          toast(r2.updated + ' shop location' + (r2.updated === 1 ? '' : 's') + ' saved' + (r2.skipped ? ' (' + r2.skipped + ' skipped: already had a location or no usable delivery)' : '') + '.'); render();
+        }).catch(function (e) { busy(save, false); showError(e); });
+      };
     }).catch(showError);
   };
 
