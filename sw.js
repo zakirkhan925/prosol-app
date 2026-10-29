@@ -1,7 +1,7 @@
 /* Prosol Foods — service worker. Keeps the app itself on the phone so it opens without signal.
  * It never touches requests to the server (script.google.com): data is handled by the app's own outbox. */
 'use strict';
-var VERSION = '6c0c4bfee4bd';
+var VERSION = '5862bf51cd3b';
 var ASSETS = ["./","index.html","app.js","styles.css","config.js","manifest.webmanifest","map.html","map.js","icons/apple-touch-icon.png","icons/icon-192.png","icons/icon-512.png","icons/maskable-512.png"];
 var CACHE = 'prosol-' + VERSION;
 

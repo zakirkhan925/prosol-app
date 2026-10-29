@@ -54,7 +54,7 @@
     'fleet.drivers': 1, 'fleet.vehicles': 1, 'commission.rules': 1, 'commission.dashboard': 1 };
   var SWR_REFRESH_MS = 8000, lastWriteAt = 0, swrInflight = {}, uiTouched = false;
   function isWriteAction(a) {
-    return a !== 'reports.run' && /\.(save\w*|create\w*|submit|approve|returnToDraft|cancel\w*|closeShort|captureLocation|set\w+|end\w+|decide\w*|pay|close\w*|backfill|retry|generateKey|run|start\w*|finish\w*|confirm|fail|update\w*|review\w*|reset\w*|import\w*|logout|changePassword)$/.test(a);
+    return a !== 'reports.run' && /\.(save\w*|create\w*|submit|approve|returnToDraft|cancel\w*|closeShort|captureLocation|set\w+|end\w+|decide\w*|pay|close\w*|backfill|retry|generateKey|run|start\w*|finish\w*|confirm|fail|update\w*|review\w*|reset\w*|import\w*|logout|changePassword|collect|receive|gpsFromDeliveries)$/.test(a);
   }
   function uiBusy() { return uiTouched || !!document.querySelector('.modal'); }
   document.addEventListener('input', function () { uiTouched = true; }, true);
@@ -1124,7 +1124,9 @@
       '<dt>Type</dt><dd>' + esc(c.CustomerType) + '</dd><dt>Credit limit</dt><dd>' + money(c.CreditLimit) + '</dd><dt>Payment terms</dt><dd>' + esc(c.PaymentTerms) + '</dd>' +
       '<dt>Outstanding</dt><dd>' + (c.QBBalanceAsOf ? money(c.QBBalance) + ' <span class="badge">as of ' + fmtDate(c.QBBalanceAsOf) + '</span>' : '<span class="badge">Not synced from QuickBooks yet</span>') + '</dd>' +
       '<dt>QuickBooks</dt><dd>' + qbCustomerState(c) + '</dd>' +
+      (Number(c.CreditOutstanding) > 0 ? '<dt>Credit from deliveries</dt><dd><b id="crOut">' + money(c.CreditOutstanding) + '</b> <span class="badge warn">not paid yet</span></dd>' : '') +
       (c.Notes ? '<dt>Notes</dt><dd>' + esc(c.Notes) + '</dd>' : '') + '</dl>' +
+      (c.CanCollectCredit && Number(c.CreditOutstanding) > 0 ? '<div class="btn-row"><button class="btn primary" id="crRecv">💵 Credit received</button></div>' : '') +
       '<div class="btn-row">' + (can(['customers.manage', 'customers.create.own']) ? '<a class="btn" href="#/customers/' + encodeURIComponent(c.CustomerID) + '/edit">Edit</a>' : '') +
       (c.CanMapQB ? '<button class="btn" id="qbMap">QuickBooks mapping</button>' : '') +
       (c.CanCreateInQB ? '<button class="btn" id="qbCreate">Create in QuickBooks</button>' : '') +
@@ -1149,6 +1151,7 @@
     shell(c.ShopName, html, { back: 'customers' });
     if ($('#capBtn')) $('#capBtn').onclick = function () { captureFlow(c); };
     if ($('#qbMap')) $('#qbMap').onclick = function () { qbMapModal('customer', c); };
+    if ($('#crRecv')) $('#crRecv').onclick = function () { collectCredit(c.CustomerID, c.ShopName, render); };
     if ($('#qbCreate')) $('#qbCreate').onclick = function () {
       var b = this; busy(b, true);
       API.call('customers.createInQb', { CustomerID: c.CustomerID }).then(function () { toast('The QuickBooks bridge will create ' + c.ShopName + ' in QuickBooks within a minute or two.'); render(); })
@@ -1615,6 +1618,7 @@
     if (cr.estimated) st += '<p class="hint" style="font-size:12px;color:var(--muted)">Offline estimate from data saved ' + esc(ago(cr.asOf)) + '. The office checks credit again when the order is sent.</p>';
     return st + '<dl class="kv"><dt>Credit limit</dt><dd>' + money(cr.creditLimit) + '</dd>' +
       '<dt>QuickBooks balance</dt><dd>' + (cr.qbBalance === null ? '<span class="badge">Not synced yet</span>' : money(cr.qbBalance) + ' <span class="badge">as of ' + fmtDate(cr.qbBalanceAsOf) + '</span>') + '</dd>' +
+      (Number(cr.deliveryCredit) > 0 ? '<dt>Credit from deliveries</dt><dd><b>' + money(cr.deliveryCredit) + '</b> <span class="badge warn">not paid yet</span></dd>' : '') +
       '<dt>Open orders</dt><dd>' + money(cr.openOrdersValue) + ' (' + cr.openOrdersCount + ')</dd><dt>Available</dt><dd>' + money(cr.available) + '</dd>' +
       '<dt>This order</dt><dd>' + money(cr.newOrder) + '</dd><dt>Available after</dt><dd style="font-weight:700;color:' + (cr.availableAfter < 0 ? 'var(--bad)' : 'inherit') + '">' + money(cr.availableAfter) + '</dd>' +
       (cr.paymentTerms ? '<dt>Payment terms</dt><dd>' + esc(cr.paymentTerms) + '</dd>' : '') + '</dl>';
@@ -2482,6 +2486,8 @@
       (c.Mobile ? '<a class="btn" href="tel:' + esc(c.Mobile) + '">📞 Call</a>' : '') + (c.WhatsApp ? '<a class="btn" target="_blank" rel="noopener" href="https://wa.me/' + esc(c.WhatsApp.replace(/^0/, '92').replace(/^\+/, '')) + '">WhatsApp</a>' : '') + '</div>' +
       (c.Latitude === '' ? '<div class="alert warn" style="margin-top:10px">This shop has no saved GPS location — navigation uses the written address.</div>' : '') +
       (s.OrderRemarks ? '<p style="font-size:14px"><b>Order note:</b> ' + esc(s.OrderRemarks) + '</p>' : '') + '</div>';
+    if (Number(s.CreditOutstanding) > 0) html += '<div class="card" id="crCard"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><div>Credit from deliveries not paid yet at this shop<div style="font-size:20px;font-weight:700">' + money(s.CreditOutstanding) + '</div></div>' +
+      (can('credit.collect') && !s.LocalPending ? '<button class="btn primary" id="crRecv">💵 Credit received</button>' : '') + '</div></div>';
     if (pending && mine) {
       html += '<form class="card" id="delForm"><h2>Delivered quantities</h2><div class="btn-row" style="margin:0 0 10px"><button type="button" class="btn" id="qAll">Deliver everything</button><button type="button" class="btn" id="qNone">Clear</button></div>' +
         s.Lines.map(function (l, i) {
@@ -2522,6 +2528,7 @@
     if ($('#vPhoto', root)) $('#vPhoto', root).onclick = function () { proofView('photo'); };
     if ($('#vSig', root)) $('#vSig', root).onclick = function () { proofView('signature'); };
     if ($('#dRet', root)) $('#dRet', root).onclick = function () { returnModal(s.Lines, function () { stopView(t.DeliveryID, s.DeliveryOrderID); }); };
+    if ($('#crRecv', root)) $('#crRecv', root).onclick = function () { collectCredit(s.CustomerID || c.CustomerID, c.ShopName, function () { stopView(t.DeliveryID, s.DeliveryOrderID); }); };
     if (!(pending && mine)) return;
 
     // quantities
@@ -2708,50 +2715,56 @@
   VIEWS.cash = function (r) {
     var q = r.q;
     loading('Cash collection');
-    API.call('cash.summary', { from: q.from || '', to: q.to || '', driverId: q.driver || '' }).then(function (res) {
-      var tot = res.rows.reduce(function (a, x) { a.cash += x.Cash; a.credit += x.Credit; a.waiting += x.Waiting; return a; }, { cash: 0, credit: 0, waiting: 0 });
+    var who = q.person || (q.driver ? 'D:' + q.driver : '');
+    API.call('cash.summary', { from: q.from || '', to: q.to || '', person: who }).then(function (res) {
+      var tot = res.rows.reduce(function (a, x) { a.cash += x.Cash; a.credit += x.Credit; a.old += x.CreditCollected || 0; a.waiting += x.Waiting; return a; }, { cash: 0, credit: 0, old: 0, waiting: 0 });
+      var people = res.people || res.drivers.map(function (d) { return { id: 'D:' + d.id, label: d.label }; });
       var html = '<form class="card" id="cashF"><div class="filters" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' +
         '<label style="font-size:13px">From<input type="date" id="cFrom" value="' + esc(res.from) + '"></label><label style="font-size:13px">To<input type="date" id="cTo" value="' + esc(res.to) + '"></label>' +
-        '<label style="font-size:13px;grid-column:1/-1">Driver<select id="cDrv"><option value="">All drivers</option>' + res.drivers.map(function (d) { return '<option value="' + esc(d.id) + '"' + (d.id === q.driver ? ' selected' : '') + '>' + esc(d.label) + '</option>'; }).join('') + '</select></label></div>' +
+        '<label style="font-size:13px;grid-column:1/-1">Driver / salesperson<select id="cDrv"><option value="">Everyone</option>' + people.map(function (d) { return '<option value="' + esc(d.id) + '"' + (d.id === who ? ' selected' : '') + '>' + esc(d.label) + '</option>'; }).join('') + '</select></label></div>' +
         '<div class="btn-row"><button class="btn primary" type="submit">Show</button><a class="btn" href="#/reports/cash">Report</a><a class="btn" href="#/reports/credit">Credit deliveries</a></div>' +
         '<p style="margin:8px 0 0;font-size:14px">Cash collected <b>' + money(Math.round(tot.cash * 100) / 100) + '</b> · on credit <b>' + money(Math.round(tot.credit * 100) / 100) + '</b>' +
+        (tot.old > 0 ? ' · old credit collected <b>' + money(Math.round(tot.old * 100) / 100) + '</b>' : '') +
         (tot.waiting > 0 ? ' · <span class="badge warn">not yet received ' + money(Math.round(tot.waiting * 100) / 100) + '</span>' : '') + '</p></form>';
       html += res.rows.length ? res.rows.map(function (x, i) {
-        return '<div class="card"><div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><div><b>' + esc(x.DriverName) + '</b><div style="color:var(--muted);font-size:13px">' + fmtDate(x.Date, false) + ' · ' + x.Stops + ' deliver' + (x.Stops === 1 ? 'y' : 'ies') + '</div></div>' +
-          (x.Waiting > 0 ? '<span class="badge warn">Cash waiting</span>' : x.Cash > 0 ? '<span class="badge good">Cash received</span>' : '') + '</div>' +
-          '<dl class="kv" style="margin-top:8px"><dt>Bills</dt><dd>' + money(x.Bill) + '</dd><dt>Cash collected</dt><dd><b>' + money(x.Cash) + '</b></dd><dt>On credit</dt><dd>' + money(x.Credit) + '</dd>' +
+        var parts = []; if (x.Stops) parts.push(x.Stops + ' deliver' + (x.Stops === 1 ? 'y' : 'ies')); if (x.Collections) parts.push(x.Collections + ' credit payment' + (x.Collections === 1 ? '' : 's'));
+        return '<div class="card"><div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><div><b>' + esc(x.PersonName || x.DriverName) + '</b><div style="color:var(--muted);font-size:13px">' + fmtDate(x.Date, false) + ' · ' + parts.join(' · ') + '</div></div>' +
+          (x.Waiting > 0 ? '<span class="badge warn">Cash waiting</span>' : (x.Cash + (x.CreditCollected || 0)) > 0 ? '<span class="badge good">Cash received</span>' : '') + '</div>' +
+          '<dl class="kv" style="margin-top:8px">' + (x.Stops ? '<dt>Bills</dt><dd>' + money(x.Bill) + '</dd><dt>Cash collected</dt><dd><b>' + money(x.Cash) + '</b></dd><dt>On credit</dt><dd>' + money(x.Credit) + '</dd>' : '') +
+          (x.CreditCollected ? '<dt>Old credit collected</dt><dd><b>' + money(x.CreditCollected) + '</b></dd>' : '') +
           (x.Received > 0 ? '<dt>Received by office</dt><dd>' + money(x.CashHandedOver) + (x.Difference ? ' <span class="badge ' + (x.Difference < 0 ? 'bad' : 'warn') + '">' + (x.Difference < 0 ? 'short ' : 'over ') + money(Math.abs(x.Difference)) + '</span>' : '') +
             (x.ReceivedByName ? '<br><small>' + esc(x.ReceivedByName) + (x.Remarks ? ' — ' + esc(x.Remarks) : '') + '</small>' : '') + '</dd>' : '') +
           (x.Waiting > 0 ? '<dt>Not yet received</dt><dd><b>' + money(x.Waiting) + '</b></dd>' : '') +
           (x.NotRecorded ? '<dt>Payment not recorded</dt><dd>' + x.NotRecorded + '</dd>' : '') + '</dl>' +
           '<div class="btn-row"><button class="btn" data-det="' + i + '">Details</button>' + (res.canReceive && x.Waiting > 0 ? '<button class="btn primary" data-rcv="' + i + '">Cash received</button>' : '') + '</div></div>';
-      }).join('') : '<div class="empty card">No deliveries in these dates.</div>';
+      }).join('') : '<div class="empty card">No deliveries or credit payments in these dates.</div>';
       var root = shell('Cash collection', html);
       $('#cashF', root).onsubmit = function (ev) { ev.preventDefault();
-        go('cash?from=' + encodeURIComponent($('#cFrom', root).value) + '&to=' + encodeURIComponent($('#cTo', root).value) + '&driver=' + encodeURIComponent($('#cDrv', root).value)); };
+        go('cash?from=' + encodeURIComponent($('#cFrom', root).value) + '&to=' + encodeURIComponent($('#cTo', root).value) + '&person=' + encodeURIComponent($('#cDrv', root).value)); };
       $all('[data-rcv]', root).forEach(function (b) { b.onclick = function () { receiveCash(res.rows[Number(b.dataset.rcv)]); }; });
       $all('[data-det]', root).forEach(function (b) { b.onclick = function () { cashDay(res.rows[Number(b.dataset.det)], res.canReceive); }; });
     }).catch(showError);
   };
   function receiveCash(x) {
-    modal('Cash received from ' + x.DriverName, '<p style="margin:0 0 8px">' + fmtDate(x.Date, false) + ' · cash collected and not yet received: <b>' + money(x.Waiting) + '</b></p>' +
+    modal('Cash received from ' + (x.PersonName || x.DriverName), '<p style="margin:0 0 8px">' + fmtDate(x.Date, false) + ' · cash collected and not yet received: <b>' + money(x.Waiting) + '</b></p>' +
       '<div class="field"><label>Cash received (PKR) *</label><input type="number" inputmode="decimal" min="0" step="any" id="rcAmt" value="' + x.Waiting + '"><div class="ferr" data-err="CashReceived"></div></div>' +
       '<div class="field"><label>Remarks (needed when the amount differs)</label><input type="text" id="rcRem" placeholder="e.g. short 300, brings it tomorrow"><div class="ferr" data-err="Remarks"></div></div>' +
       '<div class="btn-row"><button class="btn primary" id="rcOk">Confirm cash received</button><button class="btn" id="rcNo">Back</button></div>', function (m, close) {
       $('#rcNo', m).onclick = close;
       $('#rcOk', m).onclick = function () {
         var b = this; busy(b, true);
-        API.call('cash.receive', { DriverID: x.DriverID, Date: x.Date, CashReceived: $('#rcAmt', m).value, Remarks: $('#rcRem', m).value }).then(function (h) {
+        API.call('cash.receive', { DriverID: x.DriverID || '', SalespersonID: x.SalespersonID || '', Date: x.Date, CashReceived: $('#rcAmt', m).value, Remarks: $('#rcRem', m).value }).then(function (h) {
           close(); toast('Cash received: ' + money(h.CashReceived) + (h.Difference ? ' (' + (h.Difference < 0 ? 'short ' : 'over ') + money(Math.abs(h.Difference)) + ')' : '') + '.'); render();
         }).catch(function (e) { busy(b, false); fieldError(m, e); });
       };
     });
   }
   function cashDay(x, canFix) {
-    API.call('cash.dayStops', { DriverID: x.DriverID, Date: x.Date }).then(function (list) {
-      modal(x.DriverName + ' · ' + fmtDate(x.Date, false), '<div class="scroll-x"><table class="tbl"><tr><th>Shop</th><th>Bill</th><th>Payment</th><th>Cash</th><th>Credit</th><th></th></tr>' + list.map(function (s, i) {
-        return '<tr><td>' + esc(s.Customer) + '<br><small>' + esc(s.OrderNo) + ' · ' + esc(s.TripNo) + '</small></td><td class="n">' + money(s.Bill) + '</td><td>' + esc(s.PaymentLabel) + (s.Received ? '<br><span class="badge good">received</span>' : '') + '</td>' +
-          '<td class="n">' + money(s.Cash) + '</td><td class="n">' + money(s.Credit) + '</td><td>' + (canFix && !s.Received ? '<button class="btn" style="min-height:32px;padding:0 8px" data-fix="' + i + '">Correct</button>' : '') + '</td></tr>';
+    API.call('cash.dayStops', { DriverID: x.DriverID || '', SalespersonID: x.SalespersonID || '', Date: x.Date }).then(function (list) {
+      modal((x.PersonName || x.DriverName) + ' · ' + fmtDate(x.Date, false), '<div class="scroll-x"><table class="tbl"><tr><th>Shop</th><th>Bill</th><th>Payment</th><th>Cash</th><th>Credit</th><th></th></tr>' + list.map(function (s, i) {
+        var isPay = s.Type === 'CREDIT_PAYMENT';
+        return '<tr><td>' + esc(s.Customer) + '<br><small>' + (isPay ? esc(s.Remarks || '') : esc(s.OrderNo) + ' · ' + esc(s.TripNo)) + '</small></td><td class="n">' + (isPay ? '' : money(s.Bill)) + '</td><td>' + esc(s.PaymentLabel) + (s.Received ? '<br><span class="badge good">received</span>' : '') + '</td>' +
+          '<td class="n">' + money(s.Cash) + '</td><td class="n">' + (isPay ? '' : money(s.Credit)) + '</td><td>' + (canFix && !isPay && !s.Received && !s.CreditPaid ? '<button class="btn" style="min-height:32px;padding:0 8px" data-fix="' + i + '">Correct</button>' : '') + '</td></tr>';
       }).join('') + '</table></div><div class="btn-row"><button class="btn" id="cdClose">Close</button></div>', function (m, close) {
         $('#cdClose', m).onclick = close;
         $all('[data-fix]', m).forEach(function (b) { b.onclick = function () { close(); fixPayment(list[Number(b.dataset.fix)]); }; });
@@ -2773,6 +2786,31 @@
           .then(function (r2) { close(); toast('Payment corrected: ' + r2.PaymentLabel + '.'); render(); }).catch(function (e) { busy(b, false); fieldError(m, e); });
       };
     });
+  }
+
+  // ---------- money received later for credit deliveries (driver or salesperson at the shop) ----------
+  function collectCredit(customerId, shopName, done) {
+    if (Net.down()) return toast('Recording money received needs internet. Try again when the phone is online.', true);
+    var clientUUID = uuid();   // one per form: pressing Save twice (or a network retry) records the money once
+    API.call('credit.customer', { CustomerID: customerId }).then(function (cc) {
+      if (!(cc.Total > 0)) { toast(shopName + ' has no credit to pay from deliveries.'); return done && done(); }
+      modal('Credit received — ' + shopName, '<p style="margin:0 0 8px">Credit not paid yet: <b>' + money(cc.Total) + '</b></p>' +
+        '<div class="scroll-x"><table class="tbl"><tr><th>Delivered</th><th>Order</th><th>Credit</th><th>Paid</th><th>Still to pay</th></tr>' + cc.Deliveries.map(function (d) {
+          return '<tr><td>' + fmtDate(d.DeliveredAt, false) + '</td><td>' + esc(d.OrderNo) + '</td><td class="n">' + money(d.Credit) + '</td><td class="n">' + money(d.Paid) + '</td><td class="n"><b>' + money(d.Outstanding) + '</b></td></tr>';
+        }).join('') + '</table></div>' +
+        '<div class="field" style="margin-top:10px"><label>Amount received (PKR) *</label><input type="number" inputmode="decimal" min="0" step="any" id="ccAmt" value="' + cc.Total + '"><div class="ferr" data-err="Amount"></div></div>' +
+        '<div class="field"><label>Remarks</label><input type="text" id="ccRem" placeholder="e.g. paid by owner, rest next week"></div>' +
+        '<p class="hint" style="font-size:12px;color:var(--muted)">The money settles the oldest credit first. Hand it to the office with your other cash of today.</p>' +
+        '<div class="btn-row"><button class="btn primary" id="ccOk">Save — money received</button><button class="btn" id="ccNo">Back</button></div>', function (m, close) {
+        $('#ccNo', m).onclick = close;
+        $('#ccOk', m).onclick = function () {
+          var b = this; busy(b, true);
+          API.call('credit.collect', { ClientUUID: clientUUID, CustomerID: customerId, Amount: $('#ccAmt', m).value, Remarks: $('#ccRem', m).value, DeviceTime: new Date().toISOString() }).then(function (r) {
+            close(); toast('Received ' + money(r.payment.Amount) + ' from ' + shopName + '. Credit still to pay: ' + money(r.outstanding) + '.'); if (done) done();
+          }).catch(function (e) { busy(b, false); fieldError(m, e); });
+        };
+      });
+    }).catch(showError);
   }
 
   // ---------- shop GPS from deliveries (shops without a saved location) ----------
@@ -3425,6 +3463,7 @@
     if (f.indexOf('vehicle') >= 0 && o.vehicles) html += sel('rVeh', o.vehicles, params.vehicleId, 'All vehicles');
     if (f.indexOf('orderStatus') >= 0) html += sel('rSt', RPT_ORDER_STATUS, params.status, 'All statuses');
     if (f.indexOf('qbStatus') >= 0) html += sel('rSt', RPT_QB_STATUS, params.status, 'All statuses');
+    if (f.indexOf('creditStatus') >= 0) html += sel('rSt', [['OPEN', 'Only not yet paid']], params.status, 'All credit deliveries');
     if (f.indexOf('gpsStatus') >= 0) html += sel('rGps', RPT_GPS_STATUS[def.id] || [], params.gpsStatus, 'Any GPS result');
     if (f.indexOf('gps') >= 0) html += sel('rHasGps', [['captured', 'GPS captured'], ['missing', 'GPS missing']], params.gps, 'GPS: any');
     if (f.indexOf('active') >= 0) html += sel('rAct', [['true', 'Active'], ['false', 'Inactive']], params.active, 'Active + inactive');
