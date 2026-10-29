@@ -2507,6 +2507,7 @@
           '<label class="pay-opt"><input type="radio" name="pay" value="CREDIT"> <b>Credit</b> — not paid now</label></div>' +
           '<div id="payAmt" hidden style="margin-top:8px"><label style="font-size:13px">Cash collected (PKR)<input type="number" inputmode="decimal" min="0" step="any" id="dCash"></label></div>' +
           '<div id="payInfo" style="font-size:13px;margin-top:6px;color:var(--muted)"></div><div class="ferr" data-err="CashCollected"></div><div class="ferr" data-err="PaymentMode"></div></div>' +
+        (t.CanPlan && !t.IsMyTrip ? '<div class="field"><label>Reason for confirming for the driver (optional)</label><input type="text" id="dObr" placeholder="e.g. driver phone broken"></div>' : '') +
         '<div class="btn-row"><button class="btn primary" type="submit" id="dOk">✔ Confirm delivery</button><button class="btn danger" type="button" id="dFail">Could not deliver</button></div>' +
         '<p class="hint" style="font-size:12px;color:var(--muted)">Your GPS position is recorded and compared with the shop location.</p></form>';
     } else {
@@ -2603,14 +2604,7 @@
       };
       var withGps = function (pos) {
         var g = pos ? { Latitude: pos.lat, Longitude: pos.lng, Accuracy: pos.accuracy, DeviceTime: new Date().toISOString() } : {};
-        if (!pos && t.CanPlan && !t.IsMyTrip) {
-          return new Promise(function (res, rej) {
-            modal('Confirm for the driver', '<div class="field"><label>Why are you confirming instead of the driver? *</label><input type="text" id="obr"><div class="ferr" data-err="OnBehalfReason"></div></div><div class="btn-row"><button class="btn primary" id="obok">Confirm</button><button class="btn" id="obno">Back</button></div>', function (m, close) {
-              $('#obno', m).onclick = function () { close(); rej({ message: 'Not confirmed.' }); };
-              $('#obok', m).onclick = function () { close(); send({ OnBehalfReason: $('#obr', m).value }).then(res, rej); };
-            });
-          });
-        }
+        if (t.CanPlan && !t.IsMyTrip) return send({ OnBehalfReason: $('#dObr', root) ? $('#dObr', root).value : '' });   // the office phone's position is not the driver's
         return send(g).catch(function (e) {
           if (e.code !== 'GPS_MISMATCH') throw e;
           return new Promise(function (res, rej) {
@@ -2622,7 +2616,7 @@
           });
         });
       };
-      getPosition().then(withGps, function (gpsErr) { if (t.CanPlan && !t.IsMyTrip) return withGps(null); throw gpsErr; })
+      (t.CanPlan && !t.IsMyTrip ? withGps(null) : getPosition().then(withGps))
         .catch(function (e) { busy(btn, false); showError(e); });
     };
     $('#dFail', root).onclick = function () {
