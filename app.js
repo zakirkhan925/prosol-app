@@ -2102,8 +2102,12 @@
   VIEWS.quickbooks = function (r) {
     var q = r.q;
     loading('QuickBooks');
-    Promise.all([API.call('qb.status'), API.call('qb.queue', { status: q.status, q: q.q, page: Number(q.page) || 1 })]).then(function (res) {
-      var st = res[0], list = res[1], b = st.bridge;
+    // QB_SYNC_MODE = DELIVERIES: the list shows the Sales Receipts / Invoices / payments / Credit Memos posted from deliveries (view=orders: the old Sales Orders)
+    API.call('qb.status').then(function (st0) {
+      var posts = st0.mode === 'DELIVERIES' && q.view !== 'orders';
+      return API.call(posts ? 'qb.postings' : 'qb.queue', { status: q.status, q: q.q, page: Number(q.page) || 1 }).then(function (l) { return [st0, l, posts]; });
+    }).then(function (res) {
+      var st = res[0], list = res[1], posts = res[2], b = st.bridge, base = 'quickbooks?' + (q.view ? 'view=' + q.view + '&' : '');
       var online = b && (Date.now() - new Date(b.lastSeen).getTime()) < 5 * 60000;
       var html = '<div class="card"><h2>Bridge</h2>';
       if (!b) html += '<div class="alert warn">The QuickBooks bridge has never connected. Install it on the QuickBooks PC (see the setup guide) and paste the bridge key.</div>';
@@ -2119,6 +2123,11 @@
         '<dt>Lists imported</dt><dd>' + st.lists.customers + ' customers, ' + st.lists.items + ' items, ' + (st.lists.salesReps || 0) + ' sales reps' + (st.listsUpdatedAt ? ' · ' + fmtDate(st.listsUpdatedAt) : '') + '</dd>' +
         '<dt>Bridge key</dt><dd>' + (st.keyCreatedAt ? 'created ' + fmtDate(st.keyCreatedAt) : '<span class="badge warn">not generated</span>') + '</dd></dl>' +
         (st.canGenerateKey ? '<div class="btn-row"><button class="btn" id="genKey">' + (st.keyCreatedAt ? 'Replace bridge key' : 'Generate bridge key') + '</button></div>' : '') + '</div>';
+      html += '<div class="card"><h2>What goes to QuickBooks</h2>' + (st.mode === 'DELIVERIES' ?
+        '<p style="margin:0 0 6px">Each delivery when it is confirmed: <b>Sales Receipt</b> when paid in full in cash, otherwise an <b>Invoice</b> (with a <b>Receive Payment</b> for part cash). ' +
+        'Money received later posts a <b>Receive Payment</b>, an approved return a <b>Credit Memo</b>. No Sales Orders. Cash is deposited to <b>' + esc(st.depositAccount || '(QuickBooks default)') + '</b>.</p>' +
+        '<div class="btn-row">' + (posts ? '<a class="btn" href="#/quickbooks?view=orders">Older Sales Orders</a>' : '<a class="btn" href="#/quickbooks">Deliveries posted</a>') + '</div>'
+        : '<p style="margin:0">Approved orders become <b>Sales Orders</b> in QuickBooks. To post deliveries instead (Sales Receipts, Invoices, payments, Credit Memos), set <i>Qb sync mode</i> to DELIVERIES in Settings.</p>') + '</div>';
       var cc = st.customerCreate || { waiting: 0, failed: 0, unlinked: 0 };
       if (can('customers.qbmap') && (cc.waiting || cc.failed || cc.unlinked)) html += '<div class="card"><h2>Customers created in the app</h2>' +
         '<p style="font-size:14px;color:var(--muted)">New customers are created in QuickBooks by the bridge (shop name, contact, phone, address; the Prosol customer code is the QuickBooks <i>Account No.</i>). Their orders follow automatically.</p><dl class="kv">' +
@@ -2135,11 +2144,24 @@
         '<p style="font-size:14px;color:var(--muted)">Creates a Prosol customer for every active QuickBooks customer, and a Prosol product for the QuickBooks items you choose, already mapped. Records that are already mapped are skipped, so it is safe to run again after new customers or items are added in QuickBooks. Nothing is changed in QuickBooks.</p>' +
         (st.lists.customers + st.lists.items ? '<div class="btn-row"><button class="btn primary" id="qbImp">Preview</button></div>' :
           '<div class="alert warn">The QuickBooks lists have not been imported yet. They arrive when the bridge on the QuickBooks PC connects for the first time.</div>') + '</div>';
+      var cnt = posts ? st.postings || {} : st.counts;
       html += '<div class="toolbar">' + QB_TABS.map(function (t) {
-        var n = t[0] === '' ? '' : t[0] === 'MISMATCH' ? st.totalMismatches : (st.counts[t[0]] || 0);
-        return '<a class="btn' + ((q.status || '') === t[0] ? ' primary' : '') + '" href="#/quickbooks' + (t[0] ? '?status=' + t[0] : '') + '">' + t[1] + (n !== '' ? ' (' + n + ')' : '') + '</a>';
-      }).join('') + '<input type="search" class="search" id="qbSearch" placeholder="Order no., customer, TxnID" value="' + esc(q.q || '') + '"></div>';
-      html += list.items.length ? '<ul class="list">' + list.items.map(function (x, i) {
+        var n = t[0] === '' ? '' : t[0] === 'MISMATCH' ? (posts ? cnt.MISMATCH || 0 : st.totalMismatches) : (cnt[t[0]] || 0);
+        return '<a class="btn' + ((q.status || '') === t[0] ? ' primary' : '') + '" href="#/' + base + (t[0] ? 'status=' + t[0] : '') + '">' + t[1] + (n !== '' ? ' (' + n + ')' : '') + '</a>';
+      }).join('') + '<input type="search" class="search" id="qbSearch" placeholder="' + (posts ? 'Customer, ref no., TxnID' : 'Order no., customer, TxnID') + '" value="' + esc(q.q || '') + '"></div>';
+      if (posts) html += list.items.length ? '<ul class="list">' + list.items.map(function (x, i) {
+        return '<li><div class="row"><span class="main-t"><div class="t1"><b>' + esc(x.KindLabel) + '</b> ' + esc(x.RefNumber) + ' · ' + esc(x.CustomerName) + '</div>' +
+          '<div class="t2">' + money(x.Amount) + (x.OrderNo ? ' · <a href="#/orders/' + encodeURIComponent(x.OrderID) + '">' + esc(x.OrderNo) + '</a>' : '') + ' · ' + fmtDate(x.TxnDate, false) +
+          (x.QBTxnID ? ' · TxnID ' + esc(x.QBTxnID) : '') + ' · attempts ' + (x.Attempts || 0) + '</div>' +
+          (x.Waiting ? '<div class="t2">Waits for its invoice to reach QuickBooks first.</div>' : '') +
+          (x.LastError ? '<div class="t2" style="white-space:normal;color:' + (x.Status === 'SYNCED' ? 'var(--warn)' : 'var(--bad)') + '">' + esc(x.LastError) + '</div>' : '') + '</span>' +
+          '<span style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">' + qbBadge(x.Status) +
+          '<span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end"><button class="btn" style="min-height:34px;padding:0 10px" data-log="' + i + '">Log</button>' +
+          (x.ErrorCode === 'MAP_CUSTOMER' && x.Status === 'EXCEPTION' ? '<a class="btn" style="min-height:34px;padding:0 10px" href="#/customers/' + encodeURIComponent(x.CustomerID) + '">Fix mapping</a>' : '') +
+          (x.ErrorCode === 'MAP_ITEM' && x.Status === 'EXCEPTION' ? '<a class="btn" style="min-height:34px;padding:0 10px" href="#/products?qb=unmapped">Fix mapping</a>' : '') +
+          (x.CanRetry ? '<button class="btn primary" style="min-height:34px;padding:0 10px" data-pretry="' + i + '">Retry</button>' : '') + '</span></span></div></li>';
+      }).join('') + '</ul>' : '<div class="empty card">Nothing here.</div>';
+      else html += list.items.length ? '<ul class="list">' + list.items.map(function (x, i) {
         return '<li><div class="row"><span class="main-t"><div class="t1"><a href="#/orders/' + encodeURIComponent(x.OrderID) + '">' + esc(x.OrderNo) + '</a> · ' + esc(x.CustomerName) + '</div>' +
           '<div class="t2">' + money(x.NetAmount) + ' · ref ' + esc(x.QBRefNumber) + (x.QBTxnID ? ' · TxnID ' + esc(x.QBTxnID) : '') + ' · attempts ' + (x.Attempts || 0) + ' · ' + fmtDate(x.UpdatedAt) + '</div>' +
           (x.LastError ? '<div class="t2" style="white-space:normal;color:' + (x.Status === 'SYNCED' ? 'var(--warn)' : 'var(--bad)') + '">' + esc(x.LastError) + '</div>' : '') + '</span>' +
@@ -2150,17 +2172,22 @@
           (x.ErrorCode === 'MAP_SALESREP' && x.Status === 'EXCEPTION' ? '<a class="btn" style="min-height:34px;padding:0 10px" href="#/salespersons?q=' + encodeURIComponent(x.SalespersonName || '') + '">Fix mapping</a>' : '') +
           (x.CanRetry ? '<button class="btn primary" style="min-height:34px;padding:0 10px" data-retry="' + i + '">Retry</button>' : '') + '</span></span></div></li>';
       }).join('') + '</ul>' : '<div class="empty card">Nothing here.</div>';
-      var pg = pager(list, function (p) { go('quickbooks?page=' + p + (q.status ? '&status=' + q.status : '') + (q.q ? '&q=' + encodeURIComponent(q.q) : '')); });
+      var pg = pager(list, function (p) { go(base + 'page=' + p + (q.status ? '&status=' + q.status : '') + (q.q ? '&q=' + encodeURIComponent(q.q) : '')); });
       var root = shell('QuickBooks', html + pg.html); pg.bind(root);
-      var t; $('#qbSearch').oninput = function (ev) { clearTimeout(t); var sq = renderSeq; t = setTimeout(function () { if (sq !== renderSeq) return; go('quickbooks?' + (q.status ? 'status=' + q.status + '&' : '') + 'q=' + encodeURIComponent(ev.target.value)); }, 450); };
+      var t; $('#qbSearch').oninput = function (ev) { clearTimeout(t); var sq = renderSeq; t = setTimeout(function () { if (sq !== renderSeq) return; go(base + (q.status ? 'status=' + q.status + '&' : '') + 'q=' + encodeURIComponent(ev.target.value)); }, 450); };
       $all('[data-retry]', root).forEach(function (bt) { bt.onclick = function () {
         var x = list.items[Number(bt.dataset.retry)]; busy(bt, true);
         API.call('qb.retry', { QueueID: x.QueueID }).then(function () { toast(x.OrderNo + ' queued again.'); render(); }).catch(function (e) { busy(bt, false); showError(e); });
       }; });
+      $all('[data-pretry]', root).forEach(function (bt) { bt.onclick = function () {
+        var x = list.items[Number(bt.dataset.pretry)]; busy(bt, true);
+        API.call('qb.retryPosting', { PostingID: x.PostingID }).then(function () { toast(x.KindLabel + ' ' + x.RefNumber + ' queued again.'); render(); }).catch(function (e) { busy(bt, false); showError(e); });
+      }; });
       $all('[data-log]', root).forEach(function (bt) { bt.onclick = function () {
         var x = list.items[Number(bt.dataset.log)];
-        API.call('qb.log', { OrderID: x.OrderID, QueueID: x.QueueID }).then(function (rows) {
-          modal('Sync log — ' + x.OrderNo, '<div class="scroll-x"><table class="tbl"><tr><th>When</th><th>Event</th><th>Message</th></tr>' + rows.map(function (l) {
+        API.call('qb.log', { OrderID: x.OrderID || x.CustomerID, QueueID: x.QueueID || x.PostingID }).then(function (rows) {
+          if (posts) rows = rows.filter(function (l) { return l.QueueID === x.PostingID || !l.QueueID; });
+          modal('Sync log — ' + (posts ? x.KindLabel + ' ' + x.RefNumber : x.OrderNo), '<div class="scroll-x"><table class="tbl"><tr><th>When</th><th>Event</th><th>Message</th></tr>' + rows.map(function (l) {
             return '<tr><td>' + fmtDate(l.At) + '</td><td>' + esc(l.Event) + '</td><td>' + esc(l.Message) + (l.BridgeID ? '<br><small>' + esc(l.BridgeID) + '</small>' : '') + '</td></tr>';
           }).join('') + '</table></div><div class="btn-row"><button class="btn" id="lc">Close</button></div>', function (m, close) { $('#lc', m).onclick = close; });
         }).catch(showError);
@@ -2515,7 +2542,8 @@
         '<dt>GPS</dt><dd>' + (gpsStopBadge(s) || '—') + (s.OverrideReason ? '<br><small>' + esc(s.OverrideReason) + '</small>' : '') + '</dd>' + (s.Remarks ? '<dt>Remarks</dt><dd>' + esc(s.Remarks) + '</dd>' : '') +
         '<dt>Delivered value</dt><dd>' + money(s.DeliveredNet) + '</dd>' +
         (s.Status === 'DELIVERED' || s.Status === 'PARTIAL' ? '<dt>Payment</dt><dd>' + esc(s.PaymentLabel || 'Not recorded') +
-          (s.PaymentMode ? ' · cash ' + money(Number(s.CashCollected) || 0) + (Number(s.CreditAmount) > 0 ? ' · <b>credit ' + money(s.CreditAmount) + '</b>' : '') : '') + '</dd>' : '') + '</dl>' +
+          (s.PaymentMode ? ' · cash ' + money(Number(s.CashCollected) || 0) + (Number(s.CreditAmount) > 0 ? ' · <b>credit ' + money(s.CreditAmount) + '</b>' : '') : '') + '</dd>' : '') +
+        (s.QB && s.QB.length ? '<dt>QuickBooks</dt><dd id="stopQb">' + s.QB.map(function (x) { return esc(x.Kind) + ' ' + esc(x.RefNumber) + ' ' + qbBadge(x.Status); }).join('<br>') + '</dd>' : '') + '</dl>' +
         '<table class="tbl" style="margin-top:10px"><tr><th>Product</th><th>This stop</th><th>Still to deliver</th></tr>' + s.Lines.map(function (l) {
           return '<tr><td>' + esc(l.ProductName) + '</td><td>' + (l.ThisStopQty === '' ? '—' : qty(l.ThisStopQty) + ' ' + esc(l.Unit)) + '</td><td>' + (l.Outstanding > 0 ? '<b>' + qty(l.Outstanding) + '</b>' : '0') + '</td></tr>';
         }).join('') + '</table>' +
@@ -2758,7 +2786,7 @@
       modal((x.PersonName || x.DriverName) + ' · ' + fmtDate(x.Date, false), '<div class="scroll-x"><table class="tbl"><tr><th>Shop</th><th>Bill</th><th>Payment</th><th>Cash</th><th>Credit</th><th></th></tr>' + list.map(function (s, i) {
         var isPay = s.Type === 'CREDIT_PAYMENT';
         return '<tr><td>' + esc(s.Customer) + '<br><small>' + (isPay ? esc(s.Remarks || '') : esc(s.OrderNo) + ' · ' + esc(s.TripNo)) + '</small></td><td class="n">' + (isPay ? '' : money(s.Bill)) + '</td><td>' + esc(s.PaymentLabel) + (s.Received ? '<br><span class="badge good">received</span>' : '') + '</td>' +
-          '<td class="n">' + money(s.Cash) + '</td><td class="n">' + (isPay ? '' : money(s.Credit)) + '</td><td>' + (canFix && !isPay && !s.Received && !s.CreditPaid ? '<button class="btn" style="min-height:32px;padding:0 8px" data-fix="' + i + '">Correct</button>' : '') + '</td></tr>';
+          '<td class="n">' + money(s.Cash) + '</td><td class="n">' + (isPay ? '' : money(s.Credit)) + '</td><td>' + (canFix && !isPay && !s.Received && !s.CreditPaid && !s.InQB ? '<button class="btn" style="min-height:32px;padding:0 8px" data-fix="' + i + '">Correct</button>' : '') + '</td></tr>';
       }).join('') + '</table></div><div class="btn-row"><button class="btn" id="cdClose">Close</button></div>', function (m, close) {
         $('#cdClose', m).onclick = close;
         $all('[data-fix]', m).forEach(function (b) { b.onclick = function () { close(); fixPayment(list[Number(b.dataset.fix)]); }; });
