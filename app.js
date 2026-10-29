@@ -428,6 +428,10 @@
       s.DeliveredNet = r2(net); s.Remarks = i.payload.Remarks || '';
       // the payment as recorded on the phone (estimate: the office works out the bill when it arrives)
       var pm = i.payload.PaymentMode || '', cashIn = pm === 'CASH' ? s.DeliveredNet : pm === 'PART' ? r2(Number(i.payload.CashCollected) || 0) : 0;
+      if (!pm && i.payload.CashReceived !== undefined && i.payload.CashReceived !== '') {   // one amount: previous outstanding first
+        var got = r2(Number(i.payload.CashReceived) || 0), oldP = Math.min(got, Number(s.CreditOutstanding) || 0), cur = r2(got - oldP);
+        s.OldCreditPaid = oldP; cashIn = Math.min(cur, s.DeliveredNet); pm = cur <= 0 ? 'CREDIT' : cur >= s.DeliveredNet ? 'CASH' : 'PART';
+      }
       s.PaymentMode = pm === 'PART' && cashIn >= s.DeliveredNet ? 'CASH' : pm; s.PaymentLabel = PAY_LABEL[s.PaymentMode] || 'Not recorded';
       s.CashCollected = pm ? cashIn : ''; s.CreditAmount = pm ? r2(Math.max(0, s.DeliveredNet - cashIn)) : '';
       s.Status = s.Lines.every(function (l) { return l.Outstanding <= 0; }) ? 'DELIVERED' : 'PARTIAL';
@@ -2528,12 +2532,11 @@
         '<div class="field"><label>Delivery photo (optional)</label><input type="file" accept="image/*" capture="environment" id="dPhoto"><img id="dPhotoPrev" alt="" style="max-width:160px;display:none;margin-top:6px;border-radius:8px"></div>' +
         '<div class="field"><label>Customer signature (optional)</label><canvas id="sig" width="600" height="200" style="width:100%;max-width:420px;height:140px;border:1px solid var(--line);border-radius:10px;background:#fff;touch-action:none"></canvas><div><button type="button" class="btn" id="sigClear" style="min-height:36px;margin-top:6px">Clear signature</button></div></div>' +
         '<div class="field pay-box" id="payBox"><label>Payment *</label>' +
-          '<div class="pay-opts">' +
-          '<label class="pay-opt"><input type="radio" name="pay" value="CASH"> <b>Cash</b> — whole bill</label>' +
-          '<label class="pay-opt"><input type="radio" name="pay" value="PART"> <b>Part cash</b> — rest on credit</label>' +
-          '<label class="pay-opt"><input type="radio" name="pay" value="CREDIT"> <b>Credit</b> — not paid now</label></div>' +
-          '<div id="payAmt" hidden style="margin-top:8px"><label style="font-size:13px">Cash collected (PKR)<input type="number" inputmode="decimal" min="0" step="any" id="dCash"></label></div>' +
-          '<div id="payInfo" style="font-size:13px;margin-top:6px;color:var(--muted)"></div><div class="ferr" data-err="CashCollected"></div><div class="ferr" data-err="PaymentMode"></div></div>' +
+          '<dl class="kv" style="margin:4px 0 8px"><dt>This order</dt><dd id="pdBill"></dd><dt>Previous outstanding</dt><dd id="pdPrev"></dd>' +
+          '<dt><b>Total</b></dt><dd id="pdTotal" style="font-weight:700;font-size:18px"></dd></dl>' +
+          '<label style="font-size:13px">Cash received from the shop (PKR)<input type="number" inputmode="decimal" min="0" step="any" id="dCash" placeholder="0 if nothing was paid"></label>' +
+          '<div class="btn-row" style="margin:6px 0 0"><button type="button" class="btn" id="payFull">Full amount</button><button type="button" class="btn" id="payNone">No cash (credit)</button></div>' +
+          '<div id="payInfo" style="font-size:13px;margin-top:6px;color:var(--muted)"></div><div class="ferr" data-err="CashReceived"></div><div class="ferr" data-err="CashCollected"></div><div class="ferr" data-err="PaymentMode"></div></div>' +
         (t.CanPlan && !t.IsMyTrip ? '<div class="field"><label>Reason for confirming for the driver (optional)</label><input type="text" id="dObr" placeholder="e.g. driver phone broken"></div>' : '') +
         '<div class="btn-row"><button class="btn primary" type="submit" id="dOk">✔ Confirm delivery</button><button class="btn danger" type="button" id="dFail">Could not deliver</button></div>' +
         '<p class="hint" style="font-size:12px;color:var(--muted)">Your GPS position is recorded and compared with the shop location.</p></form>';
@@ -2543,6 +2546,7 @@
         '<dt>Delivered value</dt><dd>' + money(s.DeliveredNet) + '</dd>' +
         (s.Status === 'DELIVERED' || s.Status === 'PARTIAL' ? '<dt>Payment</dt><dd>' + esc(s.PaymentLabel || 'Not recorded') +
           (s.PaymentMode ? ' · cash ' + money(Number(s.CashCollected) || 0) + (Number(s.CreditAmount) > 0 ? ' · <b>credit ' + money(s.CreditAmount) + '</b>' : '') : '') + '</dd>' : '') +
+        (Number(s.OldCreditPaid) > 0 ? '<dt>Previous outstanding paid</dt><dd>' + money(s.OldCreditPaid) + '</dd>' : '') +
         (s.QB && s.QB.length ? '<dt>QuickBooks</dt><dd id="stopQb">' + s.QB.map(function (x) { return esc(x.Kind) + ' ' + esc(x.RefNumber) + ' ' + qbBadge(x.Status); }).join('<br>') + '</dd>' : '') + '</dl>' +
         '<table class="tbl" style="margin-top:10px"><tr><th>Product</th><th>This stop</th><th>Still to deliver</th></tr>' + s.Lines.map(function (l) {
           return '<tr><td>' + esc(l.ProductName) + '</td><td>' + (l.ThisStopQty === '' ? '—' : qty(l.ThisStopQty) + ' ' + esc(l.Unit)) + '</td><td>' + (l.Outstanding > 0 ? '<b>' + qty(l.Outstanding) + '</b>' : '0') + '</td></tr>';
@@ -2565,19 +2569,24 @@
     // the bill of what is being delivered (estimate from the order's prices; the office works out the exact amount)
     var billEstimate = function () { return Math.round(s.Lines.reduce(function (a, l, i) {
       var g = units(i) * Number(l.Rate), d = g * (Number(l.DiscountPct) || 0) / 100; return a + (g - d) * (1 + (Number(l.TaxRate) || 0) / 100); }, 0) * 100) / 100; };
-    var payMode = function () { var r = $('input[name=pay]:checked', root); return r ? r.value : ''; };
+    // payment: one amount; the previous outstanding is paid first (oldest first), the rest pays this order (the office works out the exact bill)
+    var prevOut = Math.round((Number(s.CreditOutstanding) || 0) * 100) / 100;
+    var r2c = function (n) { return Math.round(n * 100) / 100; };
     var showPay = function () {
-      var m = payMode(), bill = billEstimate(), info = $('#payInfo', root);
-      $('#payAmt', root).hidden = m !== 'PART';
-      var cash = Number($('#dCash', root).value) || 0;
-      info.innerHTML = 'Bill ≈ <b>' + money(bill) + '</b>' + (m === 'CASH' ? ' · collect the whole bill in cash' : m === 'CREDIT' ? ' · <b>whole bill on credit</b>'
-        : m === 'PART' ? (cash > 0 ? ' · on credit ≈ <b>' + money(Math.max(0, Math.round((bill - cash) * 100) / 100)) + '</b>' : ' · type the cash collected') : '');
+      var bill = billEstimate(), total = r2c(bill + prevOut), info = $('#payInfo', root), raw = $('#dCash', root).value;
+      $('#pdBill', root).textContent = money(bill); $('#pdPrev', root).textContent = money(prevOut); $('#pdTotal', root).textContent = money(total);
+      if (raw === '') { info.innerHTML = 'Type the cash received (0 if the shop paid nothing).'; return; }
+      var v = r2c(Number(raw) || 0), old = Math.min(v, prevOut), cur = r2c(v - old), credit = r2c(Math.max(0, bill - cur));
+      info.innerHTML = v > total + 1 ? '<span style="color:var(--bad)">More than the total (' + money(total) + ').</span>' :
+        (old > 0 ? 'Previous outstanding paid: <b>' + money(old) + '</b> · ' : '') + 'this order: cash <b>' + money(Math.min(cur, bill)) + '</b>' +
+        (credit > 0 ? ' · on credit <b>' + money(credit) + '</b>' : '') + (prevOut - old > 0 ? ' · previous still owed ' + money(r2c(prevOut - old)) : '');
     };
     var showSum = function (i) { var l = s.Lines[i], u = units(i); var el = $('[data-sum="' + i + '"]', root);
       el.innerHTML = '= ' + qty(u) + ' ' + esc(l.Unit) + (u > l.Outstanding ? ' <span class="badge bad">more than ordered</span>' : u < l.Outstanding && u > 0 ? ' <span class="badge warn">partial — ' + qty(l.Outstanding - u) + ' left</span>' : u === 0 ? ' <span class="badge">none</span>' : ' <span class="badge good">all</span>');
       if ($('#payInfo', root)) showPay(); };
-    $all('input[name=pay]', root).forEach(function (r) { r.onchange = function () { showPay(); if (r.value === 'PART') $('#dCash', root).focus(); }; });
     $('#dCash', root).oninput = showPay;
+    $('#payFull', root).onclick = function () { $('#dCash', root).value = r2c(billEstimate() + prevOut); showPay(); };
+    $('#payNone', root).onclick = function () { $('#dCash', root).value = 0; showPay(); };
     var setAll = function (full) { s.Lines.forEach(function (l, i) {
       var o = full ? l.Outstanding : 0, ctn = Math.floor(o / l.UnitsPerCarton + 1e-9);
       $('[data-ctn="' + i + '"]', root).value = ctn; $('[data-loose="' + i + '"]', root).value = Math.round((o - ctn * l.UnitsPerCarton) * 1000) / 1000; showSum(i); }); };
@@ -2616,13 +2625,12 @@
       ev.preventDefault();
       var lines = s.Lines.map(function (l, i) { return { OrderLineID: l.OrderLineID, Quantity: Math.round(units(i) * 1000) / 1000 }; });
       if (!lines.some(function (l) { return l.Quantity > 0; })) return toast('Enter what was delivered, or use "Could not deliver".', true);
-      var pm = payMode();
-      if (!pm) { toast('Choose how the shop paid: Cash, Part cash or Credit.', true); $('#payBox', root).scrollIntoView({ block: 'center' }); return; }
       var cashIn = $('#dCash', root).value;
-      if (pm === 'PART' && !(Number(cashIn) > 0)) { toast('Type the cash collected (or choose Credit if nothing was paid).', true); $('#dCash', root).focus(); return; }
+      if (cashIn === '' || !(Number(cashIn) >= 0)) { toast('Type the cash received from the shop (0 if nothing was paid).', true); $('#payBox', root).scrollIntoView({ block: 'center' }); $('#dCash', root).focus(); return; }
+      if (Number(cashIn) > r2c(billEstimate() + prevOut) + 1) { toast('The cash received is more than this order and the previous outstanding together.', true); $('#dCash', root).focus(); return; }
       var btn = $('#dOk', root); busy(btn, true);
       var payload = { DeliveryOrderID: s.DeliveryOrderID, ClientUUID: clientUUID, Lines: lines, Remarks: $('#dRem', root).value, Photo: photoData, Signature: signed ? cv.toDataURL('image/png') : null,
-        PaymentMode: pm, CashCollected: pm === 'PART' ? Number(cashIn) : '' };
+        CashReceived: r2c(Number(cashIn)) };
       var send = function (extra) {
         return API.call('delivery.confirm', Object.assign({}, payload, extra || {})).then(function (fresh) {
           toast(savedMsg(fresh, 'Delivery confirmed.'));
