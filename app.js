@@ -868,7 +868,7 @@
     var r = parseHash(), cur = r.seg[0] || 'home';
     if (cur === 'trips' && State.me && State.me.driverId && !can('delivery.plan')) cur = 'deliveries'; // driver's trip screens live under Deliveries
     var items = NAV.filter(navAllowed);
-    var side = '<div class="brand">' + esc(State.settings.COMPANY_NAME || 'Prosol Foods') + '</div>' + items.filter(function (n) { return !n.mobileOnly; })
+    var side = '<div class="brand"><img src="icons/logo.png" alt="">' + esc(State.settings.COMPANY_NAME || 'Prosol Foods') + '</div>' + items.filter(function (n) { return !n.mobileOnly; })
       .map(function (n) { return '<a href="#/' + n.path + '" class="' + (cur === n.path ? 'on' : '') + '"><span>' + n.ic + '</span>' + esc(n.label) + '</a>'; }).join('');
     var bItems = bottomItems();
     var bottom = bItems
@@ -966,11 +966,11 @@
     // the server: the Apps Script web app, the Supabase function (item D), or the local test server
     if (!hasGsr && !/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(CONFIG.apiUrl || '') &&
         !/^https:\/\/[a-z0-9]{20}\.supabase\.co\/functions\/v1\/api$/.test(CONFIG.apiUrl || '') && CONFIG.apiUrl !== '/api') {
-      $('#root').innerHTML = '<div class="login-wrap"><div class="login-card"><div class="logo">PROSOL FOODS</div><div class="card"><h2>Setup not finished</h2>' +
+      $('#root').innerHTML = '<div class="login-wrap"><div class="login-card"><div class="logo"><img src="icons/logo.png" alt="PRO-SOL Procurement Solutions"></div><div class="card"><h2>Setup not finished</h2>' +
         '<p>This copy of the app does not know the server address yet. In <b>config.js</b>, replace the placeholder with the Apps Script web-app URL (ends with <code>/exec</code>) — see DEPLOY.md section 9.</p></div></div></div>';
       return;
     }
-    $('#root').innerHTML = '<div class="login-wrap"><div class="login-card"><div class="logo">PROSOL FOODS</div><form class="card" id="lf">' +
+    $('#root').innerHTML = '<div class="login-wrap"><div class="login-card"><div class="logo"><img src="icons/logo.png" alt="PRO-SOL Procurement Solutions"></div><form class="card" id="lf">' +
       '<h2>Sign in</h2>' + (msg ? '<div class="alert bad">' + esc(msg) + '</div>' : '') +
       '<div class="field"><label for="u">Username</label><input type="text" id="u" autocomplete="username" autocapitalize="none" required></div>' +
       '<div class="field"><label for="p">Password</label><input type="password" id="p" autocomplete="current-password" required></div>' +
@@ -990,7 +990,7 @@
       '<div class="field"><label>Repeat new password</label><input type="password" name="repeat" autocomplete="new-password" required><div class="ferr" data-err="repeat"></div></div>' +
       '<div class="btn-row"><button class="btn primary" type="submit">Change password</button>' + (forced ? '<button class="btn" type="button" id="lo">Sign out</button>' : '') + '</div></form>';
     var root;
-    if (forced) { $('#root').innerHTML = '<div class="login-wrap"><div class="login-card"><div class="logo">PROSOL FOODS</div>' + html + '</div></div>'; root = $('#root'); }
+    if (forced) { $('#root').innerHTML = '<div class="login-wrap"><div class="login-card"><div class="logo"><img src="icons/logo.png" alt="PRO-SOL Procurement Solutions"></div>' + html + '</div></div>'; root = $('#root'); }
     else root = shell('Change password', html, { back: 'profile' });
     var f = $('#cp', root);
     if ($('#lo', root)) $('#lo', root).onclick = logout;
@@ -3746,7 +3746,7 @@
 
   /** Signed in before, but this phone has never opened the app with internet since: nothing to work from yet. */
   function renderOfflineStart() {
-    $('#root').innerHTML = '<div class="login-wrap"><div class="login-card"><div class="logo">PROSOL FOODS</div><div class="card"><h2>No internet</h2>' +
+    $('#root').innerHTML = '<div class="login-wrap"><div class="login-card"><div class="logo"><img src="icons/logo.png" alt="PRO-SOL Procurement Solutions"></div><div class="card"><h2>No internet</h2>' +
       '<p>Open the app once with internet so your customers, products and deliveries can be saved on this phone. After that it also works without signal.</p>' +
       '<button class="btn primary block" id="retryBoot">Try again</button></div></div></div>';
     $('#retryBoot').onclick = function () { Net.isDown = false; boot(); };
