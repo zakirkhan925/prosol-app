@@ -147,6 +147,9 @@ table.tbl th, table.tbl td { text-align: left; padding: 8px; border-bottom: 1px 
 .bar > span { display: block; height: 4px; background: var(--accent, #e17937); border-radius: 2px; }
 .printonly { display: none; }
 .print-head { margin-bottom: 10px; }
+.doc-logo { display: block; height: 56px; width: auto; margin: 0 0 4px; }
+.print-brand { margin-bottom: 10px; padding-bottom: 6px; border-bottom: 2px solid var(--accent, #e17937); }
+body.paper-80 .doc-logo { height: 40px; margin: 0 auto 4px; }
 @media print {
   .printonly { display: block; }
   .tbl.rpt { font-size: 10px; }

@@ -863,6 +863,23 @@
 
   var VIEWS = {};
 
+  /** The company logo for printed documents (orders, trip sheets, delivery notes, returns, statements, reports). */
+  function docLogo() { return '<img class="doc-logo" src="icons/logo.png" alt="PRO-SOL Procurement Solutions">'; }
+
+  /** Printing a screen that has no document header of its own (commission, cash, lists): a logo header only while printing. */
+  function addPrintBrand() {
+    var c = document.getElementById('content');
+    if (!c || c.querySelector('.print-doc, .print-head, .print-brand')) return;
+    var h = document.querySelector('.topbar h1'), d = document.createElement('div');
+    d.className = 'print-brand';
+    d.innerHTML = docLogo() + '<div style="font-size:16px;font-weight:800">' + esc(State.settings.COMPANY_NAME || 'Prosol Foods') + '</div>' +
+      (h ? '<div style="font-size:13px;font-weight:700">' + esc(h.textContent) + '</div>' : '') + '<div style="font-size:11px">' + esc(printedLine()) + '</div>';
+    c.insertBefore(d, c.firstChild);
+  }
+  function removePrintBrand() { var d = document.querySelector('#content > .print-brand'); if (d) d.remove(); }
+  window.addEventListener('beforeprint', addPrintBrand);
+  window.addEventListener('afterprint', removePrintBrand);
+
   function shell(title, bodyHtml, opts) {
     opts = opts || {};
     var r = parseHash(), cur = r.seg[0] || 'home';
@@ -2080,7 +2097,7 @@
     API.call('orders.get', { OrderID: id }).then(function (o) {
       var s = State.settings;
       var html = '<div class="print-doc"><div class="btn-row noprint" style="margin-bottom:12px"><button class="btn primary" id="doPrint">Print / Save PDF</button><a class="btn" href="#/orders/' + encodeURIComponent(o.OrderID) + '">Back</a></div>' +
-        '<div class="card"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px"><div><div style="font-size:22px;font-weight:800">' + esc(s.COMPANY_NAME || 'Prosol Foods') + '</div><div style="font-size:13px">' + esc(s.COMPANY_ADDRESS || '') + ' ' + esc(s.COMPANY_PHONE || '') + '</div></div>' +
+        '<div class="card"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px"><div>' + docLogo() + '<div style="font-size:22px;font-weight:800">' + esc(s.COMPANY_NAME || 'Prosol Foods') + '</div><div style="font-size:13px">' + esc(s.COMPANY_ADDRESS || '') + ' ' + esc(s.COMPANY_PHONE || '') + '</div></div>' +
         '<div style="text-align:right"><div style="font-size:18px;font-weight:700">SALES ORDER</div><div>' + esc(o.OrderNo) + '</div><div style="font-size:13px">' + fmtDate(o.OrderDate, false) + ' · ' + esc(ORDER_LABELS[o.Status]) + '</div></div></div>' +
         '<hr style="border:0;border-top:1px solid var(--line);margin:14px 0"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px;font-size:14px"><div><b>Customer</b><br>' + esc(o.Customer.ShopName) + ' (' + esc(o.Customer.Code) + ')<br>' + esc(o.Customer.Address) + ', ' + esc(o.Customer.Area) + ', ' + esc(o.Customer.City) + '<br>' + esc(o.Customer.Mobile) + '</div>' +
         '<div><b>Salesperson</b><br>' + esc(o.SalespersonName) + (o.Customer.PaymentTerms ? '<br><b>Terms:</b> ' + esc(o.Customer.PaymentTerms) : '') + '</div></div>' +
@@ -2708,10 +2725,12 @@
           '<div class="t2"><a href="#/orders/' + encodeURIComponent(x.OrderID) + '">' + esc(x.OrderNo) + '</a> · ' + esc(x.ProductName) + ' · ' + qty(x.Quantity) + ' ' + esc(x.Unit) + ' (' + qty(x.Cartons) + ' ctn) · ' + money(x.NetValue) + '</div>' +
           '<div class="t2">' + esc(RETURN_REASON_LABELS[x.Reason] || x.Reason) + (x.Remarks ? ' · ' + esc(x.Remarks) : '') + ' · by ' + esc(x.CreatedByName) + ' ' + fmtDate(x.CreatedAt) + (x.RejectReason ? ' · rejected: ' + esc(x.RejectReason) : '') + '</div></span>' +
           '<span style="display:flex;flex-direction:column;gap:6px;align-items:flex-end"><span class="badge ' + ({ APPROVED: 'good', REJECTED: 'bad', PENDING: 'warn' }[x.Status]) + '">' + esc(x.Status) + '</span>' +
+          '<button class="btn" style="min-height:34px;padding:0 10px" data-rprint="' + i + '">Print</button>' +
           (x.CanDecide ? '<span style="display:flex;gap:6px"><button class="btn primary" style="min-height:34px;padding:0 10px" data-ap="' + i + '">Approve</button><button class="btn danger" style="min-height:34px;padding:0 10px" data-rj="' + i + '">Reject</button></span>' : '') + '</span></div></li>';
       }).join('') + '</ul>' : '<div class="empty card">No returns.</div>';
       var pg = pager(list, function (p) { go('returns?page=' + p + (q.status ? '&status=' + q.status : '')); });
       var root = shell('Returns', html + pg.html); pg.bind(root);
+      $all('[data-rprint]', root).forEach(function (b) { b.onclick = function () { returnNote(list.items[Number(b.dataset.rprint)]); }; });
       $all('[data-ap]', root).forEach(function (b) { b.onclick = function () { var x = list.items[Number(b.dataset.ap)]; busy(b, true);
         API.call('returns.decide', { ReturnID: x.ReturnID, decision: 'APPROVE' }).then(function () { toast(x.ReturnNo + ' approved.'); render(); }).catch(function (e) { busy(b, false); showError(e); }); }; });
       $all('[data-rj]', root).forEach(function (b) { b.onclick = function () { var x = list.items[Number(b.dataset.rj)];
@@ -2721,6 +2740,25 @@
         }); }; });
     }).catch(showError);
   };
+
+  /** Printable return note of one return (A4 or 80 mm). */
+  function returnNote(x) {
+    var st = State.settings, back = location.hash.replace(/^#\//, '') || 'returns';
+    var html = '<div class="print-doc"><div class="btn-row noprint" style="margin-bottom:12px"><button class="btn primary" id="doPrint">Print / Save PDF</button><button class="btn" id="rnBack">Back</button></div>' +
+      '<div class="card"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px"><div>' + docLogo() + '<div style="font-size:20px;font-weight:800">' + esc(st.COMPANY_NAME || 'Prosol Foods') + '</div>' +
+      '<div style="font-size:13px">' + esc(st.COMPANY_ADDRESS || '') + ' ' + esc(st.COMPANY_PHONE || '') + '</div></div>' +
+      '<div style="text-align:right"><div style="font-size:18px;font-weight:700">RETURN NOTE</div><div>' + esc(x.ReturnNo) + '</div><div style="font-size:13px">' + fmtDate(x.ReturnDate || x.CreatedAt, false) + ' · ' + esc(x.Status) + '</div></div></div>' +
+      '<hr style="border:0;border-top:1px solid var(--line);margin:14px 0"><div style="font-size:14px"><b>Customer</b><br>' + esc(x.CustomerName) + '<br><b>Order</b> ' + esc(x.OrderNo) + '</div>' +
+      '<table class="tbl" style="margin-top:12px"><tr><th>Product</th><th class="n">Quantity</th><th class="n">Cartons</th><th class="n">Value</th></tr>' +
+      '<tr><td>' + esc(x.ProductName) + '</td><td class="n">' + qty(x.Quantity) + ' ' + esc(x.Unit) + '</td><td class="n">' + qty(x.Cartons) + '</td><td class="n">' + money(x.NetValue) + '</td></tr></table>' +
+      '<p style="font-size:14px"><b>Reason:</b> ' + esc(RETURN_REASON_LABELS[x.Reason] || x.Reason) + (x.Remarks ? ' — ' + esc(x.Remarks) : '') + '<br><b>Recorded by:</b> ' + esc(x.CreatedByName) + ' ' + fmtDate(x.CreatedAt) +
+      (x.RejectReason ? '<br><b>Rejected:</b> ' + esc(x.RejectReason) : '') + '</p>' +
+      '<div style="display:flex;justify-content:space-between;margin-top:36px;font-size:13px"><div>______________________<br>Customer signature</div><div>______________________<br>For ' + esc(st.COMPANY_NAME || 'Prosol Foods') + '</div></div>' +
+      '<p style="font-size:11px;color:var(--muted);margin-top:16px">' + esc(printedLine()) + '</p></div></div>';
+    var root = shell('Return ' + x.ReturnNo, html, { back: back });
+    $('#doPrint', root).onclick = function () { window.print(); };
+    $('#rnBack', root).onclick = function () { render(); };
+  }
 
   // ---------- GPS review ----------
   VIEWS.gpsreview = function (r) {
@@ -2925,7 +2963,7 @@
     loading('Print', 'trips/' + encodeURIComponent(id));
     API.call('delivery.trip', { DeliveryID: id }).then(function (t) {
       var st = State.settings;
-      var head = function (title) { return '<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><div><div style="font-size:20px;font-weight:800">' + esc(st.COMPANY_NAME || 'Prosol Foods') + '</div><div style="font-size:12px">' + esc(st.COMPANY_ADDRESS || '') + ' ' + esc(st.COMPANY_PHONE || '') + '</div></div><div style="text-align:right"><div style="font-size:17px;font-weight:700">' + title + '</div><div>' + esc(t.TripNo) + ' · ' + fmtDate(t.DeliveryDate, false) + '</div></div></div>'; };
+      var head = function (title) { return '<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><div>' + docLogo() + '<div style="font-size:20px;font-weight:800">' + esc(st.COMPANY_NAME || 'Prosol Foods') + '</div><div style="font-size:12px">' + esc(st.COMPANY_ADDRESS || '') + ' ' + esc(st.COMPANY_PHONE || '') + '</div></div><div style="text-align:right"><div style="font-size:17px;font-weight:700">' + title + '</div><div>' + esc(t.TripNo) + ' · ' + fmtDate(t.DeliveryDate, false) + '</div></div></div>'; };
       var html = '<div class="print-doc"><div class="btn-row noprint" style="margin-bottom:12px"><button class="btn primary" id="doPrint">Print / Save PDF</button><a class="btn" href="#/trips/' + encodeURIComponent(t.DeliveryID) + '">Back</a></div>';
       html += '<div class="card" style="page-break-after:always">' + head('TRIP SHEET') + '<p style="font-size:14px">Vehicle ' + esc(t.VehicleNo) + ' · Driver ' + esc(t.DriverName) + (t.Helper ? ' · Helper ' + esc(t.Helper) : '') + (t.Route ? ' · Route ' + esc(t.Route) : '') + '</p>' +
         '<table class="tbl"><tr><th>#</th><th>Shop</th><th>Order</th><th>Cartons</th><th>Value</th><th>Received / signature</th></tr>' + t.StopsList.map(function (s) {
@@ -3529,7 +3567,7 @@
     ['from', 'to', 'basis', 'groupBy', 'salespersonId', 'area', 'productId', 'customerId', 'driverId', 'vehicleId', 'status', 'gpsStatus', 'gps', 'active'].forEach(function (k) { if (params[k]) payload[k] = params[k]; });
     API.call('reports.run', payload).then(function (res) {
       var out = $('#rOut', root); if (!out) return;
-      var head = '<div class="printonly print-head"><div style="font-size:18px;font-weight:800">' + esc(State.settings.COMPANY_NAME || 'Prosol Foods') + '</div><div style="font-size:16px;font-weight:700">' + esc(res.title) + '</div><div style="font-size:12px">' + esc(res.subtitle) + '</div><div style="font-size:11px">' + esc(printedLine()) + '</div></div>';
+      var head = '<div class="printonly print-head">' + docLogo() + '<div style="font-size:18px;font-weight:800">' + esc(State.settings.COMPANY_NAME || 'Prosol Foods') + '</div><div style="font-size:16px;font-weight:700">' + esc(res.title) + '</div><div style="font-size:12px">' + esc(res.subtitle) + '</div><div style="font-size:11px">' + esc(printedLine()) + '</div></div>';
       var body = '';
       if (isStatement) body = statementHtml(res);
       else {
@@ -3562,7 +3600,7 @@
   // ---------- customer statement ----------
   function statementHtml(res) {
     var c = res.customer;
-    return '<div class="card print-doc"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px"><div><div style="font-size:20px;font-weight:800">' + esc(State.settings.COMPANY_NAME || 'Prosol Foods') + '</div>' +
+    return '<div class="card print-doc"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px"><div>' + docLogo() + '<div style="font-size:20px;font-weight:800">' + esc(State.settings.COMPANY_NAME || 'Prosol Foods') + '</div>' +
       '<div style="font-size:13px">' + esc(State.settings.COMPANY_ADDRESS || '') + ' ' + esc(State.settings.COMPANY_PHONE || '') + '</div></div><div style="text-align:right"><div style="font-size:18px;font-weight:700">CUSTOMER STATEMENT</div>' +
       '<div>' + fmtDate(res.filters.from + 'T12:00:00Z', false) + ' to ' + fmtDate(res.filters.to + 'T12:00:00Z', false) + '</div></div></div>' +
       '<hr style="border:0;border-top:1px solid var(--line);margin:12px 0"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px;font-size:14px"><div><b>' + esc(c.ShopName) + '</b> (' + esc(c.Code) + ')<br>' + esc(c.Address) + ', ' + esc(c.Area) + ', ' + esc(c.City) + '<br>' + esc(c.Mobile) + '</div>' +
@@ -3596,7 +3634,7 @@
       t.StopsList.forEach(function (s) { tot[{ DELIVERED: 'del', PARTIAL: 'part', FAILED: 'fail' }[s.Status] || 'pend']++; tot.ctn += ctn(s); tot.val += Number(s.DeliveredNet) || 0; });
       var st = State.settings;
       var html = '<div class="print-doc"><div class="btn-row noprint" style="margin-bottom:12px"><button class="btn primary" id="doPrint">Print / Save PDF</button><a class="btn" href="#/trips/' + encodeURIComponent(t.DeliveryID) + '">Back</a></div>' +
-        '<div class="card"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><div><div style="font-size:20px;font-weight:800">' + esc(st.COMPANY_NAME || 'Prosol Foods') + '</div><div style="font-size:12px">' + esc(st.COMPANY_ADDRESS || '') + ' ' + esc(st.COMPANY_PHONE || '') + '</div></div>' +
+        '<div class="card"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><div>' + docLogo() + '<div style="font-size:20px;font-weight:800">' + esc(st.COMPANY_NAME || 'Prosol Foods') + '</div><div style="font-size:12px">' + esc(st.COMPANY_ADDRESS || '') + ' ' + esc(st.COMPANY_PHONE || '') + '</div></div>' +
         '<div style="text-align:right"><div style="font-size:17px;font-weight:700">DELIVERY SUMMARY</div><div>' + esc(t.TripNo) + ' · ' + fmtDate(t.DeliveryDate, false) + '</div><div style="font-size:12px">' + esc(TRIP_LABELS[t.Status] || t.Status) + '</div></div></div>' +
         '<p style="font-size:14px">Vehicle ' + esc(t.VehicleNo) + ' · Driver ' + esc(t.DriverName) + (t.Helper ? ' · Helper ' + esc(t.Helper) : '') + (t.Route ? ' · Route ' + esc(t.Route) : '') + '</p>' +
         '<p style="font-size:14px"><b>' + tot.stops + '</b> stops: <b>' + tot.del + '</b> delivered, <b>' + tot.part + '</b> partial, <b>' + tot.fail + '</b> not delivered' + (tot.pend ? ', <b>' + tot.pend + '</b> pending' : '') + ' · <b>' + qty(tot.ctn) + '</b> cartons · <b>' + money(Math.round(tot.val * 100) / 100) + '</b></p>' +
