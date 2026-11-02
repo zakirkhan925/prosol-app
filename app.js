@@ -834,6 +834,7 @@
     { path: 'returns', label: 'Returns', ic: '↩', perm: ['returns.create', 'returns.approve', 'delivery.view.all'] },
     { path: 'gpsreview', label: 'GPS review', ic: '🛰', perm: ['delivery.plan', 'delivery.view.all'] },
     { path: 'cash', label: 'Cash collection', ic: '💵', perm: 'cash.view' },
+    { path: 'reclass', label: 'Tender reclass', ic: '🔁', perm: 'cash.receive' },
     { path: 'gpsfill', label: 'Shop GPS from deliveries', ic: '📍', perm: 'customers.manage' },
     { path: 'fleet', label: 'Fleet', ic: '🚐', perm: ['drivers.manage', 'vehicles.manage'] },
     { path: 'commission', label: 'Commission', ic: '💰', perm: ['commission.view.all', 'commission.view.own'] },
@@ -2117,7 +2118,7 @@
   var QB_TABS = [['', 'All'], ['PENDING', 'Waiting'], ['IN_PROGRESS', 'In progress'], ['FAILED', 'Retrying'], ['EXCEPTION', 'Exceptions'], ['SYNCED', 'Synced'], ['MISMATCH', 'Total mismatch'], ['CANCELLED', 'Cancelled']];
   function qbBadge(st) {
     var cls = { SYNCED: 'good', EXCEPTION: 'bad', FAILED: 'warn', PENDING: '', IN_PROGRESS: '', CANCELLED: '' }[st];
-    var label = { PENDING: 'Waiting', IN_PROGRESS: 'In progress', FAILED: 'Retrying', EXCEPTION: 'Needs action', SYNCED: 'Synced', CANCELLED: 'Cancelled' }[st] || st;
+    var label = { PENDING: 'Waiting', IN_PROGRESS: 'In progress', FAILED: 'Retrying', EXCEPTION: 'Needs action', SYNCED: 'Synced', CANCELLED: 'Cancelled', VOIDED: 'Voided' }[st] || st;
     return '<span class="badge ' + (cls || '') + '">' + esc(label) + '</span>';
   }
   VIEWS.quickbooks = function (r) {
@@ -2832,29 +2833,74 @@
       modal((x.PersonName || x.DriverName) + ' · ' + fmtDate(x.Date, false), '<div class="scroll-x"><table class="tbl"><tr><th>Shop</th><th>Bill</th><th>Payment</th><th>Cash</th><th>Credit</th><th></th></tr>' + list.map(function (s, i) {
         var isPay = s.Type === 'CREDIT_PAYMENT';
         return '<tr><td>' + esc(s.Customer) + '<br><small>' + (isPay ? esc(s.Remarks || '') : esc(s.OrderNo) + ' · ' + esc(s.TripNo)) + '</small></td><td class="n">' + (isPay ? '' : money(s.Bill)) + '</td><td>' + esc(s.PaymentLabel) + (s.Received ? '<br><span class="badge good">received</span>' : '') + '</td>' +
-          '<td class="n">' + money(s.Cash) + '</td><td class="n">' + (isPay ? '' : money(s.Credit)) + '</td><td>' + (canFix && !isPay && !s.Received && !s.CreditPaid && !s.InQB ? '<button class="btn" style="min-height:32px;padding:0 8px" data-fix="' + i + '">Correct</button>' : '') + '</td></tr>';
+          '<td class="n">' + money(s.Cash) + '</td><td class="n">' + (isPay ? '' : money(s.Credit)) + '</td><td>' + (canFix && !isPay ? '<button class="btn" style="min-height:32px;padding:0 8px" data-fix="' + i + '">Reclass</button>' : '') + '</td></tr>';
       }).join('') + '</table></div><div class="btn-row"><button class="btn" id="cdClose">Close</button></div>', function (m, close) {
         $('#cdClose', m).onclick = close;
         $all('[data-fix]', m).forEach(function (b) { b.onclick = function () { close(); fixPayment(list[Number(b.dataset.fix)]); }; });
       });
     }).catch(showError);
   }
-  function fixPayment(s) {
-    modal('Correct payment — ' + s.Customer, '<p style="margin:0 0 8px">' + esc(s.OrderNo) + ' · bill <b>' + money(s.Bill) + '</b> · now: ' + esc(s.PaymentLabel) + '</p>' +
-      '<div class="field"><label>Payment *</label><select id="fpMode"><option value="CASH">Cash — whole bill</option><option value="PART">Part cash — rest on credit</option><option value="CREDIT">Credit — not paid</option></select></div>' +
-      '<div class="field" id="fpAmtF" hidden><label>Cash collected (PKR) *</label><input type="number" inputmode="decimal" min="0" step="any" id="fpAmt"><div class="ferr" data-err="CashCollected"></div></div>' +
-      '<div class="field"><label>Reason *</label><input type="text" id="fpRsn" placeholder="e.g. driver chose Credit by mistake"><div class="ferr" data-err="Reason"></div></div>' +
-      '<div class="btn-row"><button class="btn primary" id="fpOk">Save</button><button class="btn" id="fpNo">Back</button></div>', function (m, close) {
-      var sel = $('#fpMode', m); sel.value = s.PaymentMode || 'CASH';
-      var sync = function () { $('#fpAmtF', m).hidden = sel.value !== 'PART'; }; sel.onchange = sync; sync();
+  /**
+   * Tender reclass of one delivery: how it was really paid. s: { DeliveryOrderID, Customer, OrderNo, Bill, PaymentLabel, Cash, Credit,
+   * CreditPaid, Received }. The server corrects QuickBooks too and keeps the history.
+   */
+  function fixPayment(s, done) {
+    var bill = Number(s.Bill) || 0, paid = Number(s.CreditPaid) || 0, maxCash = Math.round((bill - paid) * 100) / 100;
+    modal('Tender reclass — ' + s.Customer, '<p style="margin:0 0 8px">' + esc(s.OrderNo) + ' · bill <b>' + money(bill) + '</b></p>' +
+      '<dl class="kv" style="margin:0 0 8px"><dt>Recorded now</dt><dd>' + esc(s.PaymentLabel) + ' · cash ' + money(s.Cash) + ' · credit ' + money(s.Credit) + '</dd>' +
+      (paid > 0 ? '<dt>Credit paid later</dt><dd>' + money(paid) + ' <small>(stays as it is)</small></dd>' : '') + '</dl>' +
+      '<div class="field"><label>Cash really received for this bill (PKR) *</label><input type="number" inputmode="decimal" min="0" step="any" id="fpAmt" value="' + (Number(s.Cash) || 0) + '">' +
+      '<div class="btn-row" style="margin:6px 0 0"><button type="button" class="btn" id="fpAll">All cash' + (paid > 0 ? ' (' + money(maxCash) + ')' : '') + '</button><button type="button" class="btn" id="fpNone">All credit</button></div>' +
+      '<div id="fpInfo" style="font-size:13px;color:var(--muted);margin-top:6px"></div><div class="ferr" data-err="CashCollected"></div></div>' +
+      '<label id="fpOffice" style="display:flex;gap:8px;align-items:center;font-size:14px;margin:0 0 10px" hidden><input type="checkbox" id="fpAtOffice" style="width:20px;height:20px"> ' +
+        'The extra cash is already with the office (counted at the driver\'s cash handover that day)</label>' +
+      '<div class="field"><label>Reason *</label><input type="text" id="fpRsn" placeholder="e.g. driver took cash but chose Credit"><div class="ferr" data-err="Reason"></div></div>' +
+      '<p class="hint" style="font-size:12px;color:var(--muted)">QuickBooks is corrected by itself: more cash adds a Receive Payment; less cash voids the Sales Receipt or payment and posts the right one. The old record stays (marked VOID).</p>' +
+      '<div class="btn-row"><button class="btn primary" id="fpOk">Save reclass</button><button class="btn" id="fpNo">Back</button></div>', function (m, close) {
+      var amt = $('#fpAmt', m);
+      var sync = function () {
+        var v = Math.round((Number(amt.value) || 0) * 100) / 100, credit = Math.round((bill - v) * 100) / 100;
+        $('#fpInfo', m).innerHTML = amt.value === '' ? '' : v > maxCash + 0.005 ? '<span style="color:var(--bad)">At most ' + money(maxCash) + '.</span>' :
+          'New: <b>' + (v <= 0 ? 'Credit' : v >= bill - 0.005 ? 'Cash' : 'Part cash') + '</b> · cash ' + money(v) + ' · credit ' + money(credit);
+        $('#fpOffice', m).hidden = !(v > (Number(s.Cash) || 0) + 0.005 && s.Received !== undefined);
+      };
+      amt.oninput = sync; sync();
+      $('#fpAll', m).onclick = function () { amt.value = maxCash; sync(); };
+      $('#fpNone', m).onclick = function () { amt.value = 0; sync(); };
       $('#fpNo', m).onclick = close;
       $('#fpOk', m).onclick = function () {
         var b = this; busy(b, true);
-        API.call('cash.setPayment', { DeliveryOrderID: s.DeliveryOrderID, PaymentMode: sel.value, CashCollected: sel.value === 'PART' ? $('#fpAmt', m).value : '', Reason: $('#fpRsn', m).value })
-          .then(function (r2) { close(); toast('Payment corrected: ' + r2.PaymentLabel + '.'); render(); }).catch(function (e) { busy(b, false); fieldError(m, e); });
+        API.call('cash.reclass', { DeliveryOrderID: s.DeliveryOrderID, CashCollected: amt.value, Reason: $('#fpRsn', m).value, CashAtOffice: !!$('#fpAtOffice', m).checked })
+          .then(function (r2) { close(); toast('Reclassed: ' + r2.PaymentLabel + ' · cash ' + money(r2.Cash) + (r2.QuickBooks ? '. QuickBooks: ' + r2.QuickBooks : '') + '.'); if (done) done(); else render(); })
+          .catch(function (e) { busy(b, false); fieldError(m, e); });
       };
     });
   }
+
+  // ---------- tender reclass screen (office): find a delivery, correct how it was paid ----------
+  VIEWS.reclass = function (r) {
+    var q = r.q;
+    loading('Tender reclass');
+    API.call('cash.reclassList', { from: q.from || '', to: q.to || '', q: q.q || '' }).then(function (res) {
+      var html = '<form class="card" id="rcF"><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' +
+        '<label style="font-size:13px">From<input type="date" id="rcFrom" value="' + esc(res.from) + '"></label><label style="font-size:13px">To<input type="date" id="rcTo" value="' + esc(res.to) + '"></label>' +
+        '<label style="font-size:13px;grid-column:1/-1">Shop, code or order no.<input type="search" id="rcQ" value="' + esc(q.q || '') + '"></label></div>' +
+        '<div class="btn-row"><button class="btn primary" type="submit">Show</button></div>' +
+        '<p class="hint" style="font-size:13px;color:var(--muted);margin:6px 0 0">When the driver recorded the payment wrongly (took cash but chose Credit, or the other way round), press <b>Reclass</b> on the delivery. The history is kept and QuickBooks is corrected by itself.</p></form>';
+      html += res.rows.length ? '<ul class="list">' + res.rows.map(function (x, i) {
+        return '<li><div class="row"><span class="main-t"><div class="t1">' + esc(x.Customer) + ' <small>' + esc(x.Code) + '</small> · ' + esc(x.OrderNo) + '</div>' +
+          '<div class="t2">' + fmtDate(x.Date, false) + ' · ' + esc(x.Driver) + ' · bill ' + money(x.Bill) + ' · <b>' + esc(x.PaymentLabel) + '</b> · cash ' + money(x.Cash) + ' · credit ' + money(x.Credit) +
+          (x.CreditPaid ? ' · paid later ' + money(x.CreditPaid) : '') + '</div>' +
+          (x.QB && x.QB.length ? '<div class="t2">QuickBooks: ' + x.QB.map(function (b) { return esc(b.Kind) + ' ' + esc(b.RefNumber) + ' ' + qbBadge(b.Status); }).join(' · ') + '</div>' : '') +
+          x.History.map(function (h) { return '<div class="t2" style="white-space:normal">🔁 ' + fmtDate(h.At) + ' ' + esc(h.By) + ': ' + esc(h.From) + ' → <b>' + esc(h.To) + '</b> — ' + esc(h.Reason) + (h.QuickBooks ? ' <small>(' + esc(h.QuickBooks) + ')</small>' : '') + '</div>'; }).join('') +
+          '</span><button class="btn" style="min-height:34px;padding:0 10px;flex:none" data-rc="' + i + '">Reclass</button></div></li>';
+      }).join('') + '</ul>' : '<div class="empty card">No deliveries in these dates.</div>';
+      var root = shell('Tender reclass', html);
+      $('#rcF', root).onsubmit = function (ev) { ev.preventDefault();
+        go('reclass?from=' + encodeURIComponent($('#rcFrom', root).value) + '&to=' + encodeURIComponent($('#rcTo', root).value) + '&q=' + encodeURIComponent($('#rcQ', root).value)); };
+      $all('[data-rc]', root).forEach(function (b) { b.onclick = function () { fixPayment(res.rows[Number(b.dataset.rc)]); }; });
+    }).catch(showError);
+  };
 
   // ---------- money received later for credit deliveries (driver or salesperson at the shop) ----------
   function collectCredit(customerId, shopName, done) {
@@ -3792,6 +3838,13 @@
 
   if (!hasGsr && 'serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
     window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () { /* the app still works online */ }); });
+    // a new version of the app was installed: reload once to show it (not while the user is typing or in a dialog)
+    var hadController = !!navigator.serviceWorker.controller, reloading = false;
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (!hadController) { hadController = true; return; }   // first install: nothing old on screen
+      var tryReload = function () { if (reloading) return; if (uiBusy()) return setTimeout(tryReload, 3000); reloading = true; location.reload(); };
+      tryReload();
+    });
   }
 
   document.addEventListener('DOMContentLoaded', boot);
