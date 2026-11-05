@@ -833,7 +833,7 @@
     { path: 'trips', label: 'Trips', ic: '🚛', perm: ['delivery.plan', 'delivery.view.all'], routePerm: ['delivery.plan', 'delivery.view.all', 'delivery.own'] },
     { path: 'returns', label: 'Returns', ic: '↩', perm: ['returns.create', 'returns.approve', 'delivery.view.all'] },
     { path: 'gpsreview', label: 'GPS review', ic: '🛰', perm: ['delivery.plan', 'delivery.view.all'] },
-    { path: 'collect', label: 'Receive payment', ic: '💰', perm: 'credit.collect' },
+    { path: 'collect', label: 'Receive payment', ic: '💰', perm: 'credit.collect', routePerm: 'credit.collect', collector: true },
     { path: 'cash', label: 'Cash collection', ic: '💵', perm: 'cash.view' },
     { path: 'reclass', label: 'Tender reclass', ic: '🔁', perm: 'cash.receive' },
     { path: 'gpsfill', label: 'Shop GPS from deliveries', ic: '📍', perm: 'customers.manage' },
@@ -853,7 +853,7 @@
     { path: 'profile', label: 'Profile', ic: '👤', perm: null }
   ];
   /** Mobile bottom bar: first four permitted main sections + More. */
-  function navAllowed(n) { return (!n.perm || can(n.perm)) && (!n.driverOnly || !!(State.me && State.me.driverId)); }
+  function navAllowed(n) { return (!n.perm || can(n.perm)) && (!n.driverOnly || !!(State.me && State.me.driverId)) && (!n.collector || isCollector()); }
   /** Mobile bottom bar per role (spec: salesperson Home/Customers/Orders/Visits; driver Home/Deliveries/Map/Completed), then More. */
   var BOTTOM_BY_ROLE = { SALESPERSON: ['home', 'customers', 'orders', 'visits'], DRIVER: ['home', 'deliveries', 'map', 'completed'],
     DISTRIBUTION_MANAGER: ['home', 'planning', 'trips', 'returns'], ACCOUNTS: ['home', 'commission', 'quickbooks', 'returns'] };
@@ -862,6 +862,9 @@
     var main = pref.map(function (p) { return NAV.filter(function (n) { return n.path === p && navAllowed(n); })[0]; }).filter(Boolean);
     return main.concat(NAV.filter(function (n) { return n.path === 'more'; }));
   }
+
+  /** A login linked to a driver or salesperson: only they record money received from shops (an Admin has every permission but is neither). */
+  function isCollector() { return !!(State.me && (State.me.driverId || State.me.salespersonId)); }
 
   var VIEWS = {};
 
@@ -2907,6 +2910,8 @@
   // ---------- Receive payment: money from a shop without a delivery (driver or salesperson) ----------
   VIEWS.collect = function (r) {
     var q = r.q;
+    if (!isCollector()) return shell('Receive payment', '<div class="card"><p style="margin:0 0 8px">Money from shops is recorded by the driver or salesperson who receives it, from their own login. This login is not linked to a driver or salesperson.</p>' +
+      '<div class="btn-row"><a class="btn primary" href="#/reports/balances">See Credit balances</a></div></div>');
     loading('Receive payment');
     API.call('credit.shops', { q: q.q || '' }).then(function (res) {
       var html = '<form class="card" id="coF"><label style="font-size:13px">Shop name, code, mobile or area<input type="search" id="coQ" value="' + esc(q.q || '') + '"></label>' +
