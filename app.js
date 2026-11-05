@@ -833,6 +833,7 @@
     { path: 'trips', label: 'Trips', ic: '🚛', perm: ['delivery.plan', 'delivery.view.all'], routePerm: ['delivery.plan', 'delivery.view.all', 'delivery.own'] },
     { path: 'returns', label: 'Returns', ic: '↩', perm: ['returns.create', 'returns.approve', 'delivery.view.all'] },
     { path: 'gpsreview', label: 'GPS review', ic: '🛰', perm: ['delivery.plan', 'delivery.view.all'] },
+    { path: 'collect', label: 'Receive payment', ic: '💰', perm: 'credit.collect' },
     { path: 'cash', label: 'Cash collection', ic: '💵', perm: 'cash.view' },
     { path: 'reclass', label: 'Tender reclass', ic: '🔁', perm: 'cash.receive' },
     { path: 'gpsfill', label: 'Shop GPS from deliveries', ic: '📍', perm: 'customers.manage' },
@@ -1091,7 +1092,8 @@
       return API.call('customers.list', { q: q.q, area: q.area, salespersonId: q.sp, mine: q.mine, active: q.active, gps: q.gps, qb: q.qb, incomplete: q.incomplete, qbcreate: q.qbcreate, page: page });
     }).then(function (res) {
       var canCreate = can(['customers.manage', 'customers.create.own']);
-      var html = '<div class="toolbar"><input type="search" class="search" id="cq" placeholder="Search name, code, phone, area" value="' + esc(q.q || '') + '">' +
+      var html = (can(['customers.view.all', 'customers.view.own', 'cash.view']) ? '<div class="btn-row" style="margin:0 0 8px"><a class="btn" id="cBal" href="#/reports/balances">Credit balances</a></div>' : '') +
+        '<div class="toolbar"><input type="search" class="search" id="cq" placeholder="Search name, code, phone, area" value="' + esc(q.q || '') + '">' +
         '<select id="cArea"><option value="">All areas</option>' + (custOpts.areas || []).map(function (a) { return '<option' + (a === q.area ? ' selected' : '') + '>' + esc(a) + '</option>'; }).join('') + '</select>' +
         // salespersons see every shop; "My shops" narrows to the ones assigned to them
         (State.me && State.me.salespersonId && !can('customers.view.all') ? '<select id="cMine" aria-label="Which shops"><option value="">All shops</option><option value="1"' + (q.mine === '1' ? ' selected' : '') + '>My shops</option></select>' : '') +
@@ -1148,7 +1150,7 @@
       '<dt>QuickBooks</dt><dd>' + qbCustomerState(c) + '</dd>' +
       (Number(c.CreditOutstanding) > 0 ? '<dt>Credit from deliveries</dt><dd><b id="crOut">' + money(c.CreditOutstanding) + '</b> <span class="badge warn">not paid yet</span></dd>' : '') +
       (c.Notes ? '<dt>Notes</dt><dd>' + esc(c.Notes) + '</dd>' : '') + '</dl>' +
-      (c.CanCollectCredit && Number(c.CreditOutstanding) > 0 ? '<div class="btn-row"><button class="btn primary" id="crRecv">💵 Credit received</button></div>' : '') +
+      (c.CanCollectCredit && (Number(c.CreditOutstanding) > 0 || Number(c.CreditPayable) > 0) ? '<div class="btn-row"><button class="btn primary" id="crRecv">💵 Credit received</button></div>' : '') +
       '<div class="btn-row">' + (can(['customers.manage', 'customers.create.own']) ? '<a class="btn" href="#/customers/' + encodeURIComponent(c.CustomerID) + '/edit">Edit</a>' : '') +
       (c.CanMapQB ? '<button class="btn" id="qbMap">QuickBooks mapping</button>' : '') +
       (c.CanCreateInQB ? '<button class="btn" id="qbCreate">Create in QuickBooks</button>' : '') +
@@ -2902,17 +2904,39 @@
     }).catch(showError);
   };
 
+  // ---------- Receive payment: money from a shop without a delivery (driver or salesperson) ----------
+  VIEWS.collect = function (r) {
+    var q = r.q;
+    loading('Receive payment');
+    API.call('credit.shops', { q: q.q || '' }).then(function (res) {
+      var html = '<form class="card" id="coF"><label style="font-size:13px">Shop name, code, mobile or area<input type="search" id="coQ" value="' + esc(q.q || '') + '"></label>' +
+        '<div class="btn-row"><button class="btn primary" type="submit">Search</button></div>' +
+        '<p class="hint" style="font-size:13px;color:var(--muted);margin:6px 0 0">For a shop that pays old pending money when there is nothing to deliver. ' + (q.q ? '' : 'Below: shops with something to pay.') + ' Hand the cash to the office with your other cash of today.</p></form>';
+      html += res.rows.length ? '<ul class="list">' + res.rows.map(function (x, i) {
+        return '<li><div class="row"><span class="main-t"><div class="t1">' + esc(x.ShopName) + ' <small>' + esc(x.Code) + '</small></div>' +
+          '<div class="t2">' + esc(x.Area) + ' · Prosol credit ' + money(x.AppCredit) + ' · QuickBooks ' + (x.QBBalance === null ? 'not synced' : money(x.QBBalance)) + '</div></span>' +
+          (x.Payable > 0 ? '<button class="btn primary" style="min-height:34px;padding:0 10px;flex:none" data-co="' + i + '">Receive</button>' : '<span class="badge">Nothing to pay</span>') + '</div></li>';
+      }).join('') + '</ul>' + (res.total > res.rows.length ? '<p class="hint" style="font-size:13px;color:var(--muted)">' + res.total + ' shops found; search to narrow it down.</p>' : '')
+        : '<div class="empty card">' + (q.q ? 'No shop found.' : 'No shop has anything to pay.') + '</div>';
+      var root = shell('Receive payment', html);
+      $('#coF', root).onsubmit = function (ev) { ev.preventDefault(); go('collect?q=' + encodeURIComponent($('#coQ', root).value)); };
+      $all('[data-co]', root).forEach(function (b) { b.onclick = function () { var x = res.rows[Number(b.dataset.co)]; collectCredit(x.CustomerID, x.ShopName, render); }; });
+    }).catch(showError);
+  };
+
   // ---------- money received later for credit deliveries (driver or salesperson at the shop) ----------
   function collectCredit(customerId, shopName, done) {
     if (Net.down()) return toast('Recording money received needs internet. Try again when the phone is online.', true);
     var clientUUID = uuid();   // one per form: pressing Save twice (or a network retry) records the money once
     API.call('credit.customer', { CustomerID: customerId }).then(function (cc) {
-      if (!(cc.Total > 0)) { toast(shopName + ' has no credit to pay from deliveries.'); return done && done(); }
-      modal('Credit received — ' + shopName, '<p style="margin:0 0 8px">Credit not paid yet: <b>' + money(cc.Total) + '</b></p>' +
-        '<div class="scroll-x"><table class="tbl"><tr><th>Delivered</th><th>Order</th><th>Credit</th><th>Paid</th><th>Still to pay</th></tr>' + cc.Deliveries.map(function (d) {
+      if (!(cc.Payable > 0)) { toast(shopName + ' has nothing to pay.'); return done && done(); }
+      modal('Credit received — ' + shopName, '<p style="margin:0 0 8px">Credit not paid yet: <b>' + money(cc.Total) + '</b>' +
+        (cc.QBBalance !== null && cc.QBBalance !== undefined ? '<br>QuickBooks balance: <b>' + money(cc.QBBalance) + '</b> <small>as of ' + fmtDate(cc.QBBalanceAsOf) + '</small>' : '') +
+        (cc.Payable > cc.Total ? '<br>Can be received now: <b>' + money(cc.Payable) + '</b>' : '') + '</p>' +
+        (!cc.Deliveries.length ? '' : '<div class="scroll-x"><table class="tbl"><tr><th>Delivered</th><th>Order</th><th>Credit</th><th>Paid</th><th>Still to pay</th></tr>' + cc.Deliveries.map(function (d) {
           return '<tr><td>' + fmtDate(d.DeliveredAt, false) + '</td><td>' + esc(d.OrderNo) + '</td><td class="n">' + money(d.Credit) + '</td><td class="n">' + money(d.Paid) + '</td><td class="n"><b>' + money(d.Outstanding) + '</b></td></tr>';
-        }).join('') + '</table></div>' +
-        '<div class="field" style="margin-top:10px"><label>Amount received (PKR) *</label><input type="number" inputmode="decimal" min="0" step="any" id="ccAmt" value="' + cc.Total + '"><div class="ferr" data-err="Amount"></div></div>' +
+        }).join('') + '</table></div>') +
+        '<div class="field" style="margin-top:10px"><label>Amount received (PKR) *</label><input type="number" inputmode="decimal" min="0" step="any" id="ccAmt" value="' + cc.Payable + '"><div class="ferr" data-err="Amount"></div></div>' +
         '<div class="field"><label>Remarks</label><input type="text" id="ccRem" placeholder="e.g. paid by owner, rest next week"></div>' +
         '<p class="hint" style="font-size:12px;color:var(--muted)">The money settles the oldest credit first. Hand it to the office with your other cash of today.</p>' +
         '<div class="btn-row"><button class="btn primary" id="ccOk">Save — money received</button><button class="btn" id="ccNo">Back</button></div>', function (m, close) {
@@ -2920,7 +2944,7 @@
         $('#ccOk', m).onclick = function () {
           var b = this; busy(b, true);
           API.call('credit.collect', { ClientUUID: clientUUID, CustomerID: customerId, Amount: $('#ccAmt', m).value, Remarks: $('#ccRem', m).value, DeviceTime: new Date().toISOString() }).then(function (r) {
-            close(); toast('Received ' + money(r.payment.Amount) + ' from ' + shopName + '. Credit still to pay: ' + money(r.outstanding) + '.'); if (done) done();
+            close(); toast('Received ' + money(r.payment.Amount) + ' from ' + shopName + '. Credit still to pay: ' + money(r.remaining === undefined ? r.outstanding : r.remaining) + '.'); if (done) done();
           }).catch(function (e) { busy(b, false); fieldError(m, e); });
         };
       });
@@ -3570,6 +3594,7 @@
     html += '<div class="toolbar" style="margin:0">';
     if (f.indexOf('basis') >= 0) html += sel('rBasis', [['BOOKED', 'Booked orders'], ['DELIVERED', 'Delivered sales']], params.basis, false);
     if (f.indexOf('groupBy') >= 0 && def.groupBy) html += sel('rGroup', def.groupBy.map(function (g) { return [g, 'By ' + RPT_GROUP[g].toLowerCase()]; }), params.groupBy, false);
+    if (f.indexOf('shopName') >= 0) html += '<input type="search" id="rQ" placeholder="Shop name, code or mobile" aria-label="Shop name" value="' + esc(params.q || '') + '">';
     if (f.indexOf('salesperson') >= 0 && o.salespersons) html += sel('rSp', o.salespersons, params.salespersonId, 'All salespersons');
     if (f.indexOf('area') >= 0 && o.areas && o.areas.length) html += sel('rArea', o.areas.map(function (a) { return [a, a]; }), params.area, 'All areas');
     if (f.indexOf('product') >= 0 && o.products) html += sel('rProd', o.products, params.productId, 'All products');
@@ -3577,6 +3602,7 @@
     if (f.indexOf('vehicle') >= 0 && o.vehicles) html += sel('rVeh', o.vehicles, params.vehicleId, 'All vehicles');
     if (f.indexOf('orderStatus') >= 0) html += sel('rSt', RPT_ORDER_STATUS, params.status, 'All statuses');
     if (f.indexOf('qbStatus') >= 0) html += sel('rSt', RPT_QB_STATUS, params.status, 'All statuses');
+    if (f.indexOf('balanceStatus') >= 0) html += sel('rSt', [['ALL', 'All shops']], params.status, 'Shops with a balance');
     if (f.indexOf('creditStatus') >= 0) html += sel('rSt', [['OPEN', 'Only not yet paid']], params.status, 'All credit deliveries');
     if (f.indexOf('gpsStatus') >= 0) html += sel('rGps', RPT_GPS_STATUS[def.id] || [], params.gpsStatus, 'Any GPS result');
     if (f.indexOf('gps') >= 0) html += sel('rHasGps', [['captured', 'GPS captured'], ['missing', 'GPS missing']], params.gps, 'GPS: any');
@@ -3591,7 +3617,7 @@
     var root = shell(def.title, html, { back: 'reports' });
     $all('[data-quick]', root).forEach(function (b) { b.onclick = function () { var x = quickRange(b.dataset.quick); setQ({ from: x[0], to: x[1], quick: b.dataset.quick }); }; });
     if ($('#rFrom', root)) { var cust = function () { setQ({ from: $('#rFrom', root).value, to: $('#rTo', root).value }); }; $('#rFrom', root).onchange = cust; $('#rTo', root).onchange = cust; }
-    [['rBasis', 'basis'], ['rGroup', 'groupBy'], ['rSp', 'salespersonId'], ['rArea', 'area'], ['rProd', 'productId'], ['rDrv', 'driverId'], ['rVeh', 'vehicleId'], ['rSt', 'status'], ['rGps', 'gpsStatus'], ['rHasGps', 'gps'], ['rAct', 'active']]
+    [['rQ', 'q'], ['rBasis', 'basis'], ['rGroup', 'groupBy'], ['rSp', 'salespersonId'], ['rArea', 'area'], ['rProd', 'productId'], ['rDrv', 'driverId'], ['rVeh', 'vehicleId'], ['rSt', 'status'], ['rGps', 'gpsStatus'], ['rHasGps', 'gps'], ['rAct', 'active']]
       .forEach(function (x) { var el = $('#' + x[0], root); if (el) el.onchange = function () { var p = {}; p[x[1]] = el.value; setQ(p); }; });
     if ($('#rCustClr', root)) $('#rCustClr', root).onclick = function () { setQ({ customerId: '', customerName: '' }); };
     if ($('#rCust', root)) {
@@ -3610,7 +3636,7 @@
     if (isStatement && !params.customerId) { $('#rOut', root).innerHTML = '<div class="empty card">Choose a customer to see the statement.</div>'; return; }
 
     var payload = { report: def.id };
-    ['from', 'to', 'basis', 'groupBy', 'salespersonId', 'area', 'productId', 'customerId', 'driverId', 'vehicleId', 'status', 'gpsStatus', 'gps', 'active'].forEach(function (k) { if (params[k]) payload[k] = params[k]; });
+    ['from', 'to', 'basis', 'groupBy', 'salespersonId', 'area', 'productId', 'customerId', 'driverId', 'vehicleId', 'status', 'gpsStatus', 'gps', 'active', 'q'].forEach(function (k) { if (params[k]) payload[k] = params[k]; });
     API.call('reports.run', payload).then(function (res) {
       var out = $('#rOut', root); if (!out) return;
       var head = '<div class="printonly print-head">' + docLogo() + '<div style="font-size:18px;font-weight:800">' + esc(State.settings.COMPANY_NAME || 'Prosol Foods') + '</div><div style="font-size:16px;font-weight:700">' + esc(res.title) + '</div><div style="font-size:12px">' + esc(res.subtitle) + '</div><div style="font-size:11px">' + esc(printedLine()) + '</div></div>';
