@@ -203,3 +203,4 @@ body.paper-80 .print-doc [style*="justify-content:space-between"] > div { text-a
 .pay-opt { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 15px; min-height: 44px; cursor: pointer; background: var(--card); }
 .pay-opt input { width: 20px; height: 20px; margin: 0; flex: none; }
 .pay-opt:has(input:checked) { border-color: var(--brand-2); box-shadow: inset 3px 0 0 var(--brand-2); }
+.cat-name small.last-price { color: var(--brand-2); }

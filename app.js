@@ -832,6 +832,8 @@
     { path: 'planning', label: 'Planning', ic: '🧭', perm: 'delivery.plan' },
     { path: 'trips', label: 'Trips', ic: '🚛', perm: ['delivery.plan', 'delivery.view.all'], routePerm: ['delivery.plan', 'delivery.view.all', 'delivery.own'] },
     { path: 'returns', label: 'Returns', ic: '↩', perm: ['returns.create', 'returns.approve', 'delivery.view.all'] },
+    { path: 'store', label: 'Loading list', ic: '📦', perm: 'store.view' },
+    { path: 'stock', label: 'Stock', ic: '🏬', perm: 'stock.view' },
     { path: 'gpsreview', label: 'GPS review', ic: '🛰', perm: ['delivery.plan', 'delivery.view.all'] },
     { path: 'collect', label: 'Receive payment', ic: '💰', perm: 'credit.collect', routePerm: 'credit.collect', collector: true },
     { path: 'cash', label: 'Cash collection', ic: '💵', perm: 'cash.view' },
@@ -856,7 +858,7 @@
   function navAllowed(n) { return (!n.perm || can(n.perm)) && (!n.driverOnly || !!(State.me && State.me.driverId)) && (!n.collector || isCollector()); }
   /** Mobile bottom bar per role (spec: salesperson Home/Customers/Orders/Visits; driver Home/Deliveries/Map/Completed), then More. */
   var BOTTOM_BY_ROLE = { SALESPERSON: ['home', 'customers', 'orders', 'visits'], DRIVER: ['home', 'deliveries', 'map', 'completed'],
-    DISTRIBUTION_MANAGER: ['home', 'planning', 'trips', 'returns'], ACCOUNTS: ['home', 'commission', 'quickbooks', 'returns'] };
+    DISTRIBUTION_MANAGER: ['home', 'planning', 'trips', 'returns'], ACCOUNTS: ['home', 'commission', 'quickbooks', 'returns'], STORE_KEEPER: ['home', 'store', 'stock'] };
   function bottomItems() {
     var pref = BOTTOM_BY_ROLE[State.me && State.me.roleCode] || ['home', 'customers', 'orders', 'products'];
     var main = pref.map(function (p) { return NAV.filter(function (n) { return n.path === p && navAllowed(n); })[0]; }).filter(Boolean);
@@ -864,7 +866,7 @@
   }
 
   /** A login linked to a driver or salesperson: only they record money received from shops (an Admin has every permission but is neither). */
-  function isCollector() { return !!(State.me && (State.me.driverId || State.me.salespersonId)); }
+  function isCollector() { return !!(State.me && (State.me.driverId || State.me.salespersonId || (State.me.permissions || []).indexOf('*') >= 0)); }
 
   var VIEWS = {};
 
@@ -1154,6 +1156,7 @@
       (Number(c.CreditOutstanding) > 0 ? '<dt>Credit from deliveries</dt><dd><b id="crOut">' + money(c.CreditOutstanding) + '</b> <span class="badge warn">not paid yet</span></dd>' : '') +
       (c.Notes ? '<dt>Notes</dt><dd>' + esc(c.Notes) + '</dd>' : '') + '</dl>' +
       (c.CanCollectCredit && (Number(c.CreditOutstanding) > 0 || Number(c.CreditPayable) > 0) ? '<div class="btn-row"><button class="btn primary" id="crRecv">💵 Credit received</button></div>' : '') +
+      (can('returns.create') && (State.me.driverId || State.me.salespersonId) && !c.LocalPending ? '<div class="btn-row"><button class="btn" id="shopRet">↩ Take back goods (return)</button></div>' : '') +
       '<div class="btn-row">' + (can(['customers.manage', 'customers.create.own']) ? '<a class="btn" href="#/customers/' + encodeURIComponent(c.CustomerID) + '/edit">Edit</a>' : '') +
       (c.CanMapQB ? '<button class="btn" id="qbMap">QuickBooks mapping</button>' : '') +
       (c.CanCreateInQB ? '<button class="btn" id="qbCreate">Create in QuickBooks</button>' : '') +
@@ -1179,6 +1182,7 @@
     if ($('#capBtn')) $('#capBtn').onclick = function () { captureFlow(c); };
     if ($('#qbMap')) $('#qbMap').onclick = function () { qbMapModal('customer', c); };
     if ($('#crRecv')) $('#crRecv').onclick = function () { collectCredit(c.CustomerID, c.ShopName, render); };
+    if ($('#shopRet')) $('#shopRet').onclick = function () { shopReturn(c.CustomerID, c.ShopName); };
     if ($('#qbCreate')) $('#qbCreate').onclick = function () {
       var b = this; busy(b, true);
       API.call('customers.createInQb', { CustomerID: c.CustomerID }).then(function () { toast('The QuickBooks bridge will create ' + c.ShopName + ' in QuickBooks within a minute or two.'); render(); })
@@ -1704,7 +1708,7 @@
       // the products chosen for this order (from the searchable product list), keyed by ProductID, in the order they were added;
       // only rows with a quantity become order lines
       items: {}, added: [], catalogue: null, categories: [], filter: '',
-      gps: null, credit: null,
+      gps: null, credit: null, last: {},   // last: the price this shop paid last time, per product (reference only)
       // the salesperson who took the order owns it (commission, QuickBooks Sales Rep). A salesperson's login books for themself;
       // an office user chooses, starting from the shop's own salesperson.
       office: !(State.me && State.me.salespersonId), spId: o ? o.SalespersonID : '', spOptions: null
@@ -1725,10 +1729,31 @@
 
     var custId = o ? o.CustomerID : q.customer;
     (custId ? API.call('customers.get', { CustomerID: custId }) : Promise.resolve(null)).then(function (c) { setCustomer(c); draw(); }).catch(function (e) { showError(e); draw(); });
-    function setCustomer(c) { st.customer = c; if (c && st.office && !o) st.spId = c.SalespersonID || ''; }
+    /** Shows the last prices on what is already on screen, without redrawing it (the user may be typing). */
+    function applyLast() {
+      $all('#prodPick option', root).forEach(function (op) {
+        var l = st.last[op.value]; if (l && op.textContent.indexOf(' · last ') < 0) op.textContent += ' · last ' + money(l.CartonPrice);
+      });
+      $all('.cat-row[data-pid]', root).forEach(function (row) {
+        var l = st.last[row.dataset.pid], name = $('.cat-name', row);
+        if (!l || !name || $('.last-price', row)) return;
+        var sm = document.createElement('small'); sm.className = 'last-price';
+        sm.innerHTML = 'Last price for this shop: <b>' + money(l.CartonPrice) + '/ctn</b> on ' + fmtDate(l.Date, false);
+        name.appendChild(sm);
+      });
+    }
+    function setCustomer(c) {
+      st.customer = c; st.last = {};
+      if (c && st.office && !o) st.spId = c.SalespersonID || '';
+      if (c) API.call('orders.lastPrices', { CustomerID: c.CustomerID, OrderID: o ? o.OrderID : '' }).then(function (lp) {   // without signal: simply no reference
+        if (st.customer !== c) return;
+        st.last = lp || {}; applyLast();
+      }).catch(function () { /* reference only */ });
+    }
 
     function draw() {
       var body = $('#ofBody', root); if (!body) return;
+      var ps = $('#prodSearch', body); if (ps) st.filter = ps.value;   // a redraw (e.g. the salesperson list arriving) keeps what is being typed
       var html = '';
       if (!st.customer) {
         html += '<div class="card"><h2>1. Customer</h2><input type="search" id="custSearch" placeholder="Search customer name, code, phone, area" autocomplete="off"><ul class="list" id="custResults" style="margin-top:8px"></ul></div>';
@@ -1792,9 +1817,14 @@
     function drawCatalogue() {
       var box = $('#catBox', root); if (!box) return;
       drawLines();
+      // until the product list has arrived, remember what is typed and an Enter, and apply them once it is there
+      var early = $('#prodSearch', root), pendingEnter = false;
+      if (early) { early.oninput = function () { st.filter = early.value; }; early.onkeydown = function (ev) { if (ev.key === 'Enter') { ev.preventDefault(); st.filter = early.value; pendingEnter = true; } }; }
       loadCatalogue().then(function () {
         if (!$('#prodPick', root)) return;
+        var inp = $('#prodSearch', root); if (inp) st.filter = inp.value;
         fillPick(); bindPicker();
+        if (pendingEnter) { var found = matches(); if (found.length === 1) addProduct(found[0].ProductID); }
       }).catch(function (e) { box.innerHTML = '<div class="alert bad">' + esc(e.message || 'Products could not be loaded.') + '</div>'; });
     }
     function productById(id) { return (st.catalogue || []).filter(function (x) { return x.ProductID === id; })[0] || (st.items[id] && st.items[id].product); }
@@ -1814,7 +1844,8 @@
         : found.length ? '— choose a product (' + found.length + ') —' : (st.filter ? 'No product matches "' + st.filter + '"' : 'All products are on the order');
       sel.innerHTML = '<option value="">' + esc(head) + '</option>' + names.map(function (g) {
         return '<optgroup label="' + esc(g) + '">' + groups[g].sort(function (a, b) { return a.Name.localeCompare(b.Name); }).map(function (p) {
-          return '<option value="' + esc(p.ProductID) + '" data-sku="' + esc(p.SKU) + '">' + esc(p.Name) + ' · ' + esc(p.SKU) + ' · ' + money(listCtnOf(p)) + '/ctn</option>';
+          return '<option value="' + esc(p.ProductID) + '" data-sku="' + esc(p.SKU) + '">' + esc(p.Name) + ' · ' + esc(p.SKU) + ' · ' + money(listCtnOf(p)) + '/ctn' +
+            (st.last[p.ProductID] ? ' · last ' + money(st.last[p.ProductID].CartonPrice) : '') + '</option>';
         }).join('') + '</optgroup>';
       }).join('');
     }
@@ -1859,7 +1890,8 @@
       var it = st.items[p.ProductID] || { Cartons: '', LooseUnits: '', CartonPrice: Math.round(Number(p.WholesalePrice) * Number(p.UnitsPerCarton) * 100) / 100, DiscountMode: 'AMT', DiscountAmount: '', DiscountPct: '', more: false };
       var id = esc(p.ProductID), listCtn = Math.round(Number(p.WholesalePrice) * Number(p.UnitsPerCarton) * 100) / 100;
       return '<div class="cat-row" data-pid="' + id + '" data-sku="' + esc(p.SKU) + '" data-key="' + esc((p.Name + ' ' + p.SKU).toLowerCase()) + '">' +
-        '<div class="cat-head"><div class="cat-name"><b>' + esc(p.Name) + '</b><small>' + esc(p.SKU) + ' · ' + esc(p.UnitsPerCarton) + ' ' + esc(p.Unit) + ' per carton · list ' + money(listCtn) + '/ctn</small></div>' +
+        '<div class="cat-head"><div class="cat-name"><b>' + esc(p.Name) + '</b><small>' + esc(p.SKU) + ' · ' + esc(p.UnitsPerCarton) + ' ' + esc(p.Unit) + ' per carton · list ' + money(listCtn) + '/ctn' +
+          (st.last[p.ProductID] ? '</small><small class="last-price">Last price for this shop: <b>' + money(st.last[p.ProductID].CartonPrice) + '/ctn</b> on ' + fmtDate(st.last[p.ProductID].Date, false) : '') + '</small></div>' +
         '<button type="button" class="cat-del" data-del aria-label="Remove ' + esc(p.Name) + '">Remove</button></div>' +
         '<div class="cat-in"><label>Cartons<input type="number" inputmode="numeric" min="0" step="1" data-f="Cartons" value="' + esc(it.Cartons) + '" placeholder="0"></label>' +
         '<label>Price per carton<input type="number" inputmode="decimal" min="0" step="any" data-f="CartonPrice" value="' + esc(it.CartonPrice) + '"></label></div>' +
@@ -2540,6 +2572,7 @@
       (c.Mobile ? '<a class="btn" href="tel:' + esc(c.Mobile) + '">📞 Call</a>' : '') + (c.WhatsApp ? '<a class="btn" target="_blank" rel="noopener" href="https://wa.me/' + esc(c.WhatsApp.replace(/^0/, '92').replace(/^\+/, '')) + '">WhatsApp</a>' : '') + '</div>' +
       (c.Latitude === '' ? '<div class="alert warn" style="margin-top:10px">This shop has no saved GPS location — navigation uses the written address.</div>' : '') +
       (s.OrderRemarks ? '<p style="font-size:14px"><b>Order note:</b> ' + esc(s.OrderRemarks) + '</p>' : '') + '</div>';
+    if (can('returns.create') && State.me.driverId) html += '<div class="btn-row" style="margin:0 0 10px"><button class="btn" id="shopRet">↩ Take back goods from an earlier delivery</button></div>';
     if (Number(s.CreditOutstanding) > 0) html += '<div class="card" id="crCard"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><div>Credit from deliveries not paid yet at this shop<div style="font-size:20px;font-weight:700">' + money(s.CreditOutstanding) + '</div></div>' +
       (can('credit.collect') && !s.LocalPending ? '<button class="btn primary" id="crRecv">💵 Credit received</button>' : '') + '</div></div>';
     if (pending && mine) {
@@ -2585,6 +2618,7 @@
     if ($('#vSig', root)) $('#vSig', root).onclick = function () { proofView('signature'); };
     if ($('#dRet', root)) $('#dRet', root).onclick = function () { returnModal(s.Lines, function () { stopView(t.DeliveryID, s.DeliveryOrderID); }); };
     if ($('#crRecv', root)) $('#crRecv', root).onclick = function () { collectCredit(s.CustomerID || c.CustomerID, c.ShopName, function () { stopView(t.DeliveryID, s.DeliveryOrderID); }); };
+    if ($('#shopRet', root)) $('#shopRet', root).onclick = function () { shopReturn(s.CustomerID || c.CustomerID, c.ShopName); };
     if (!(pending && mine)) return;
 
     // quantities
@@ -2698,6 +2732,39 @@
   }
 
   // ---------- returns ----------
+  /** Goods taken back at a shop from any earlier delivery (not the order being delivered now). Needs internet. */
+  function shopReturn(customerId, shopName, done) {
+    if (Net.down()) return toast('Recording this return needs internet. Try again when the phone is online.', true);
+    var cu = uuid();
+    API.call('returns.forShop', { CustomerID: customerId }).then(function (res) {
+      if (!res.Products.length) return toast('Nothing delivered to ' + shopName + ' through the app can be taken back.', true);
+      modal('Take back goods — ' + shopName, '<div class="field"><label>Product *</label><select id="srP">' + res.Products.map(function (x, i) {
+          return '<option value="' + i + '">' + esc(x.ProductName) + ' — up to ' + qty(x.Returnable) + ' ' + esc(x.Unit) + ' (last ' + esc(x.LastOrderNo) + ', ' + fmtDate(x.LastDelivered, false) + ')</option>'; }).join('') + '</select></div>' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><label style="font-size:13px">Cartons<input type="number" inputmode="numeric" min="0" step="1" id="srC"></label>' +
+        '<label style="font-size:13px" id="srUL">Loose units<input type="number" inputmode="decimal" min="0" step="any" id="srU"></label></div><div id="srInfo" style="font-size:13px;color:var(--muted);margin-top:4px"></div><div class="ferr" data-err="Quantity"></div>' +
+        '<div class="field"><label>Reason *</label><select id="srR">' + Object.keys(RETURN_REASON_LABELS).map(function (k) { return '<option value="' + k + '">' + RETURN_REASON_LABELS[k] + '</option>'; }).join('') + '</select><div class="ferr" data-err="Reason"></div></div>' +
+        '<div class="field"><label>Remarks</label><input type="text" id="srM" placeholder="e.g. damaged cartons from last week"></div>' +
+        '<p class="hint" style="font-size:12px;color:var(--muted)">Taken from the most recent deliveries of this product, at the price the shop paid. The office approves it; then it goes to QuickBooks as a Credit Memo.</p>' +
+        '<div class="btn-row"><button class="btn primary" id="srOk">Save return</button><button class="btn" id="srNo">Back</button></div>', function (m, close) {
+        var cur = function () { return res.Products[Number($('#srP', m).value)]; };
+        var units = function () { var x = cur(); return (Number($('#srC', m).value) || 0) * Number(x.UnitsPerCarton) + (Number($('#srU', m).value) || 0); };
+        var info = function () { var x = cur(), u = Math.round(units() * 1000) / 1000;
+          $('#srUL', m).firstChild.textContent = 'Loose ' + x.Unit;
+          $('#srInfo', m).innerHTML = '= ' + qty(u) + ' ' + esc(x.Unit) + (u > x.Returnable ? ' <span class="badge bad">more than can be returned</span>' : ''); };
+        $('#srP', m).onchange = info; $('#srC', m).oninput = info; $('#srU', m).oninput = info; info();
+        $('#srNo', m).onclick = close;
+        $('#srOk', m).onclick = function () {
+          var b = this, x = cur(), u = Math.round(units() * 1000) / 1000;
+          if (!(u > 0)) return fieldError(m, { message: 'Enter the cartons or units taken back.', field: 'Quantity' });
+          busy(b, true);
+          API.call('returns.createForShop', { ClientUUID: cu, CustomerID: customerId, ProductID: x.ProductID, Quantity: u, Reason: $('#srR', m).value, Remarks: $('#srM', m).value })
+            .then(function (r) { close(); toast('Return saved: ' + r.returns.map(function (z) { return z.ReturnNo; }).join(', ') + '. The office approves it.'); if (done) done(); })
+            .catch(function (e) { busy(b, false); fieldError(m, e); });
+        };
+      });
+    }).catch(showError);
+  }
+
   function returnModal(lines, done) {
     var opts = lines.filter(function (l) { return (l.Delivered || l.DeliveredQty) > (l.Returned || l.ReturnedQty || 0); });
     if (!opts.length) return toast('Nothing delivered that can be returned.', true);
@@ -2834,7 +2901,7 @@
     });
   }
   function cashDay(x, canFix) {
-    API.call('cash.dayStops', { DriverID: x.DriverID || '', SalespersonID: x.SalespersonID || '', Date: x.Date }).then(function (list) {
+    API.call('cash.dayStops', { DriverID: x.DriverID || '', SalespersonID: x.SalespersonID || '', UserID: x.UserID || '', Date: x.Date }).then(function (list) {
       modal((x.PersonName || x.DriverName) + ' · ' + fmtDate(x.Date, false), '<div class="scroll-x"><table class="tbl"><tr><th>Shop</th><th>Bill</th><th>Payment</th><th>Cash</th><th>Credit</th><th></th></tr>' + list.map(function (s, i) {
         var isPay = s.Type === 'CREDIT_PAYMENT';
         return '<tr><td>' + esc(s.Customer) + '<br><small>' + (isPay ? esc(s.Remarks || '') : esc(s.OrderNo) + ' · ' + esc(s.TripNo)) + '</small></td><td class="n">' + (isPay ? '' : money(s.Bill)) + '</td><td>' + esc(s.PaymentLabel) + (s.Received ? '<br><span class="badge good">received</span>' : '') + '</td>' +
@@ -2910,7 +2977,7 @@
   // ---------- Receive payment: money from a shop without a delivery (driver or salesperson) ----------
   VIEWS.collect = function (r) {
     var q = r.q;
-    if (!isCollector()) return shell('Receive payment', '<div class="card"><p style="margin:0 0 8px">Money from shops is recorded by the driver or salesperson who receives it, from their own login. This login is not linked to a driver or salesperson.</p>' +
+    if (!isCollector()) return shell('Receive payment', '<div class="card"><p style="margin:0 0 8px">Money from shops is recorded by the driver or salesperson who receives it (or the Super Admin at the office), from their own login. This login is not linked to a driver or salesperson.</p>' +
       '<div class="btn-row"><a class="btn primary" href="#/reports/balances">See Credit balances</a></div></div>');
     loading('Receive payment');
     API.call('credit.shops', { q: q.q || '' }).then(function (res) {
@@ -2920,12 +2987,81 @@
       html += res.rows.length ? '<ul class="list">' + res.rows.map(function (x, i) {
         return '<li><div class="row"><span class="main-t"><div class="t1">' + esc(x.ShopName) + ' <small>' + esc(x.Code) + '</small></div>' +
           '<div class="t2">' + esc(x.Area) + ' · Prosol credit ' + money(x.AppCredit) + ' · QuickBooks ' + (x.QBBalance === null ? 'not synced' : money(x.QBBalance)) + '</div></span>' +
-          (x.Payable > 0 ? '<button class="btn primary" style="min-height:34px;padding:0 10px;flex:none" data-co="' + i + '">Receive</button>' : '<span class="badge">Nothing to pay</span>') + '</div></li>';
+          '<span style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;flex:none">' +
+          (x.Payable > 0 ? '<button class="btn primary" style="min-height:34px;padding:0 10px" data-co="' + i + '">Receive</button>' : '<span class="badge">Nothing to pay</span>') +
+          (can('returns.create') && (State.me.driverId || State.me.salespersonId) ? '<button class="btn" style="min-height:34px;padding:0 10px" data-ret="' + i + '">Return</button>' : '') + '</span></div></li>';
       }).join('') + '</ul>' + (res.total > res.rows.length ? '<p class="hint" style="font-size:13px;color:var(--muted)">' + res.total + ' shops found; search to narrow it down.</p>' : '')
         : '<div class="empty card">' + (q.q ? 'No shop found.' : 'No shop has anything to pay.') + '</div>';
       var root = shell('Receive payment', html);
       $('#coF', root).onsubmit = function (ev) { ev.preventDefault(); go('collect?q=' + encodeURIComponent($('#coQ', root).value)); };
       $all('[data-co]', root).forEach(function (b) { b.onclick = function () { var x = res.rows[Number(b.dataset.co)]; collectCredit(x.CustomerID, x.ShopName, render); }; });
+      $all('[data-ret]', root).forEach(function (b) { b.onclick = function () { var x = res.rows[Number(b.dataset.ret)]; shopReturn(x.CustomerID, x.ShopName); }; });
+    }).catch(showError);
+  };
+
+  // ---------- loading list: cartons of each product to hand to the drivers ----------
+  VIEWS.store = function (r) {
+    var q = r.q;
+    loading('Loading list');
+    API.call('store.loadList', { date: q.date || '' }).then(function (res) {
+      var tbl = function (lines) {
+        return '<div class="scroll-x"><table class="tbl"><tr><th>Product</th><th class="n">Cartons</th><th class="n">Loose</th><th class="n">Total units</th></tr>' + lines.map(function (x) {
+          return '<tr><td>' + esc(x.ProductName) + '<br><small>' + esc(x.SKU) + ' · ' + x.UnitsPerCarton + ' ' + esc(x.Unit) + '/ctn</small></td><td class="n"><b>' + qty(x.Cartons) + '</b></td><td class="n">' +
+            (x.Loose ? qty(x.Loose) + ' ' + esc(x.Unit) : '—') + '</td><td class="n">' + qty(x.Units) + '</td></tr>'; }).join('') + '</table></div>';
+      };
+      var html = '<div class="print-doc"><form class="card noprint" id="slF"><label style="font-size:13px">Day<input type="date" id="slD" value="' + esc(res.date) + '"></label>' +
+        '<div class="btn-row"><button class="btn primary" type="submit">Show</button><button class="btn" type="button" id="slPrint">Print / Save PDF</button></div>' +
+        '<p class="hint" style="font-size:13px;color:var(--muted);margin:6px 0 0">Planned and out trips of the day, with what is still to be delivered on each.</p></form>' +
+        '<div class="card"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><div>' + docLogo() + '<div style="font-size:18px;font-weight:800">' + esc(State.settings.COMPANY_NAME || 'Prosol Foods') + '</div></div>' +
+        '<div style="text-align:right"><div style="font-size:17px;font-weight:700">LOADING LIST</div><div>' + fmtDate(res.date, false) + ' · ' + res.trips.length + ' trip' + (res.trips.length === 1 ? '' : 's') + '</div></div></div></div>';
+      if (!res.trips.length) html += '<div class="empty card">No planned trips on this day.</div>';
+      else {
+        html += '<div class="card"><h2>Day total</h2>' + tbl(res.total) + '</div>';
+        html += res.trips.map(function (t, i) {
+          return '<div class="card" style="page-break-inside:avoid"><div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><div><h2 style="margin:0">' + esc(t.TripNo) + '</h2>' +
+            '<div style="font-size:14px;color:var(--muted)">Driver ' + esc(t.Driver) + ' · vehicle ' + esc(t.Vehicle) + (t.Route ? ' · ' + esc(t.Route) : '') + ' · ' + t.Shops + ' shop' + (t.Shops === 1 ? '' : 's') + ' · ' + qty(t.Cartons) + ' ctn</div></div>' +
+            (t.LoadedAt ? '<span class="badge good">Handed over</span>' : '<span class="badge warn">Not handed over</span>') + '</div>' + tbl(t.Lines) +
+            (t.LoadedAt ? '<p style="font-size:13px;margin:6px 0 0">Handed over to the driver by ' + esc(t.LoadedBy) + ', ' + fmtDate(t.LoadedAt) + '</p>'
+              : (res.canHandover ? '<div class="btn-row noprint"><button class="btn primary" data-ho="' + i + '">✔ Handed over to driver</button></div>' : '')) +
+            '<div class="printonly"><div style="display:flex;justify-content:space-between;margin-top:30px;font-size:13px"><div>______________________<br>Store keeper</div><div>______________________<br>Driver</div></div></div></div>';
+        }).join('');
+      }
+      html += '</div>';
+      var root = shell('Loading list', html);
+      $('#slF', root).onsubmit = function (ev) { ev.preventDefault(); go('store?date=' + encodeURIComponent($('#slD', root).value)); };
+      $('#slPrint', root).onclick = function () { window.print(); };
+      $all('[data-ho]', root).forEach(function (b) { b.onclick = function () {
+        var t = res.trips[Number(b.dataset.ho)];
+        confirmBox('Handed over', 'The goods of ' + t.TripNo + ' (' + qty(t.Cartons) + ' cartons) were handed over to ' + t.Driver + '?', 'Yes, handed over').then(function (y) {
+          if (!y) return; busy(b, true);
+          API.call('store.handover', { DeliveryID: t.DeliveryID }).then(function () { toast(t.TripNo + ' handed over.'); render(); }).catch(function (e) { busy(b, false); showError(e); });
+        });
+      }; });
+    }).catch(showError);
+  };
+
+  // ---------- stock: QuickBooks on hand minus what is not in QuickBooks yet ----------
+  VIEWS.stock = function (r) {
+    var q = r.q;
+    loading('Stock');
+    API.call('stock.list', { q: q.q || '', only: q.only || '' }).then(function (res) {
+      var c = function (v, x) { return v === null || v === '' ? '<span class="badge">not read</span>' : '<b>' + qty(x) + '</b> ctn<br><small>' + qty(v) + '</small>'; };
+      var html = '<div class="print-doc"><form class="card noprint" id="skF"><div style="display:grid;grid-template-columns:2fr 1fr;gap:8px"><label style="font-size:13px">Product or SKU<input type="search" id="skQ" value="' + esc(q.q || '') + '"></label>' +
+        '<label style="font-size:13px">Show<select id="skO"><option value="">All products</option><option value="short"' + (q.only === 'short' ? ' selected' : '') + '>Net below zero</option></select></label></div>' +
+        '<div class="btn-row"><button class="btn primary" type="submit">Show</button><button class="btn" type="button" id="skPrint">Print / Save PDF</button></div>' +
+        '<p class="hint" style="font-size:13px;color:var(--muted);margin:6px 0 0"><b>Net</b> = QuickBooks on hand − approved orders not delivered yet − deliveries not in QuickBooks yet + returns not in QuickBooks yet. ' +
+        'QuickBooks quantities are read by the bridge about every hour' + (res.asOf ? ' (last ' + fmtDate(res.asOf) + ')' : ' (not read yet: needs bridge 1.4.0)') + '.</p></form>' +
+        '<div class="card">' + docLogo() + '<h2 style="margin:4px 0 8px">Stock' + (res.asOf ? ' <small style="font-weight:400">QuickBooks as of ' + fmtDate(res.asOf) + '</small>' : '') + '</h2>' +
+        (res.rows.length ? '<div class="scroll-x"><table class="tbl"><tr><th>Product</th><th class="n">Net stock</th><th class="n">QuickBooks on hand</th><th class="n">Open orders</th><th class="n">Delivered, not in QB</th><th class="n">Returns, not in QB</th></tr>' +
+          res.rows.map(function (x) {
+            return '<tr><td>' + esc(x.Name) + '<br><small>' + esc(x.SKU) + ' · ' + x.UnitsPerCarton + ' ' + esc(x.Unit) + '/ctn' + (x.Mapped ? '' : ' · <span class="badge warn">not linked to QuickBooks</span>') + '</small></td>' +
+              '<td class="n"' + (x.Net !== null && x.Net < 0 ? ' style="color:var(--bad)"' : '') + '>' + c(x.Net, x.NetCtn) + '</td>' +
+              '<td class="n">' + c(x.QBOnHand, x.QBOnHandCtn) + '</td><td class="n">' + qty(x.OpenCtn) + ' ctn<br><small>' + qty(x.OpenOrders) + '</small></td>' +
+              '<td class="n">' + qty(x.DeliveredCtn) + ' ctn<br><small>' + qty(x.DeliveredNotInQB) + '</small></td><td class="n">' + qty(x.ReturnsCtn) + ' ctn<br><small>' + qty(x.ReturnsNotInQB) + '</small></td></tr>';
+          }).join('') + '</table></div>' : '<div class="empty">No products.</div>') + '</div></div>';
+      var root = shell('Stock', html);
+      $('#skF', root).onsubmit = function (ev) { ev.preventDefault(); go('stock?q=' + encodeURIComponent($('#skQ', root).value) + '&only=' + encodeURIComponent($('#skO', root).value)); };
+      $('#skPrint', root).onclick = function () { window.print(); };
     }).catch(showError);
   };
 
