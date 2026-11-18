@@ -2927,7 +2927,7 @@
       '<label id="fpOffice" style="display:flex;gap:8px;align-items:center;font-size:14px;margin:0 0 10px" hidden><input type="checkbox" id="fpAtOffice" style="width:20px;height:20px"> ' +
         'The extra cash is already with the office (counted at the driver\'s cash handover that day)</label>' +
       '<div class="field"><label>Reason *</label><input type="text" id="fpRsn" placeholder="e.g. driver took cash but chose Credit"><div class="ferr" data-err="Reason"></div></div>' +
-      '<p class="hint" style="font-size:12px;color:var(--muted)">QuickBooks is corrected by itself: more cash adds a Receive Payment; less cash voids the Sales Receipt or payment and posts the right one. The old record stays (marked VOID).</p>' +
+      '<p class="hint" style="font-size:12px;color:var(--muted)">QuickBooks is corrected by itself: more cash adds a Receive Payment; less cash changes the Receive Payment to the right amount (or removes it when nothing was paid), or voids a Sales Receipt (it stays, marked VOID) and posts an Invoice.</p>' +
       '<div class="btn-row"><button class="btn primary" id="fpOk">Save reclass</button><button class="btn" id="fpNo">Back</button></div>', function (m, close) {
       var amt = $('#fpAmt', m);
       var sync = function () {
